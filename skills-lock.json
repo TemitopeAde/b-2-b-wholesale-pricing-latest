@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "skills": {
+    "replatform": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "94951fff481b1ba218560c962d790adf36377c9cda6d9c92781dab21f80ae54f"
+    },
+    "wix-app": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "180a6ff4516c5ed1dc8b5ea92c322d38b9fb2ed371fa53f9133e48605ba44f03"
+    },
+    "wix-base44-connector": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "2cc2301192a2191096a836eccfe2b83c7497f3794b3a608ecd5a144253912e40"
+    },
+    "wix-design-system": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "47da8b5791959362c730a630c9893473a7e7fa645bbe93b63b306df2ddccbbaf"
+    },
+    "wix-docs": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "707412d644d9c0828d30e03649d4a44addeef244b9c2fee65f1f8d9184f53b96"
+    },
+    "wix-headless": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "587282cefa5d7620f9d585cc6ebff34b2e70223a0f5b30fe0bdff890eb526b24"
+    },
+    "wix-headless-kit": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "dba1a935f2c1ccebbd0fb6ecab247457de07224dcdcc381559b707c2bbd0a482"
+    },
+    "wix-headless-templates": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "28bcd1205df9246193e99b28aaa363ef20958617f407d7727c6833edfa8f241b"
+    },
+    "wix-manage": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "0b994c875033b04df631b2913cbb10f502e069c5b239c4fa1512f745d42f4de8"
+    },
+    "wix-vibe-headless": {
+      "source": "./node_modules/@wix/agent-skills",
+      "sourceType": "local",
+      "computedHash": "d789ac8db764908f12cfa4683ddccd577af059d7af811ae9ec57369064621db3"
+    }
+  }
+}
