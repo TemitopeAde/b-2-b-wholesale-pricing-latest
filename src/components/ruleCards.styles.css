@@ -1,0 +1,148 @@
+/* Rule Cards Styles */
+.rule-cards-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+}
+
+@media (min-width: 1024px) {
+  .rule-cards-container {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.rule-card {
+  background-color: white;
+  border-radius: 8px;
+  padding: 1.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  min-height: 280px;
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.rule-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+}
+
+.rule-card.active {
+  border: 2px solid #10b981;
+}
+
+.rule-card.inactive {
+  border: 2px solid #e5e7eb;
+}
+
+.rule-card-content {
+  flex: 1;
+  padding-right: 2rem;
+}
+
+.rule-card-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.rule-card-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #111827;
+  margin-right: 0.5rem;
+  line-height: 1.2;
+}
+
+.rule-card-badge {
+  padding: 2px 6px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  margin-right: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.rule-card-badge.pricing {
+  background-color: #dbeafe;
+  color: #1e40af;
+}
+
+.rule-card-badge.non-pricing {
+  background-color: #f3e8ff;
+  color: #7c3aed;
+}
+
+.rule-card-badge.active {
+  background-color: #dcfce7;
+  color: #166534;
+}
+
+.rule-card-badge.inactive {
+  background-color: #f3f4f6;
+  color: #6b7280;
+}
+
+.rule-card-description {
+  margin: 0 0 1rem 0;
+  color: #6b7280;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.rule-card-details {
+  margin-bottom: 1rem;
+}
+
+.rule-card-details-pricing {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.rule-card-detail-item {
+  margin-top: 0.75rem;
+}
+
+.rule-card-detail-label {
+  font-size: 0.7rem;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+.rule-card-detail-value {
+  margin: 0.25rem 0 0 0;
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.rule-card-detail-value.discount {
+  font-weight: 600;
+  color: #059669;
+}
+
+.rule-card-detail-value.moq {
+  font-weight: 600;
+  color: #7c3aed;
+}
+
+.rule-card-detail-value.default {
+  color: #111827;
+}
+
+.rule-card-detail-value.access-groups {
+  color: #111827;
+  font-size: 0.8rem;
+  word-break: break-word;
+}
+
+.rule-card-action-menu {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+}

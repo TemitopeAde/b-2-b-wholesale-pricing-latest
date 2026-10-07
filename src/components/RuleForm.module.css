@@ -1,0 +1,63 @@
+.form {
+  font-family: var(--wh-body);
+  color: var(--wh-ink);
+}
+
+.sectionTitle {
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0 !important;
+}
+
+.dropzone {
+  padding: 28px 20px;
+  border: 1.5px dashed #cfcec8;
+  border-radius: 14px;
+  background: var(--wh-sunk);
+  text-align: center;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.dropzone:hover {
+  border-color: var(--wh-accent);
+  background: #f7f8fe;
+}
+
+.dropIcon {
+  width: 44px;
+  height: 44px;
+  margin-bottom: 4px;
+  border-radius: 12px;
+  background: var(--wh-accent-tint);
+  color: var(--wh-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.form :global(.react-datepicker-wrapper),
+.form :global(.react-datepicker__input-container) {
+  display: block;
+  width: 100%;
+}
+
+.form :global(.react-datepicker) {
+  font-family: var(--wh-body);
+  border: 1px solid var(--wh-line);
+  border-radius: 12px;
+  box-shadow: var(--wh-shadow-pop);
+  overflow: hidden;
+}
+
+.form :global(.react-datepicker__header) {
+  background: var(--wh-sunk);
+  border-bottom: 1px solid var(--wh-line-soft);
+}
+
+.form :global(.react-datepicker__day--selected),
+.form :global(.react-datepicker__day--keyboard-selected),
+.form :global(.react-datepicker__time-list-item--selected) {
+  background: var(--wh-accent) !important;
+  color: #fff !important;
+  border-radius: 8px;
+}

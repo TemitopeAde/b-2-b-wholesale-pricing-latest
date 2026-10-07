@@ -1,0 +1,83 @@
+.root {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.injectedPriceRow {
+  width: 100%;
+  margin-top: 4px;
+}
+
+.injectedPriceValue {
+  display: inline-block;
+}
+
+.loaderWrapper {
+  display: inline-flex;
+  vertical-align: middle;
+}
+
+.retailPriceStrike {
+  color: rgba(17, 24, 39, 0.55);
+  opacity: 0.8;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.loader {
+  display: inline-block;
+  height: 18px;
+  overflow: visible;
+  vertical-align: middle;
+  width: 40px;
+}
+
+.loaderDotFirst {
+  animation: swing 1.2s linear infinite;
+  transform-origin: center top;
+}
+
+.loaderDotSecond {
+  animation: swing2 1.2s linear infinite;
+  transform-origin: center top;
+}
+
+.hidden {
+  display: none;
+}
+
+@keyframes swing {
+  0% {
+    transform: rotate(0deg);
+    animation-timing-function: ease-out;
+  }
+
+  25% {
+    transform: rotate(50deg);
+    animation-timing-function: ease-in;
+  }
+
+  50% {
+    transform: rotate(0deg);
+    animation-timing-function: linear;
+  }
+}
+
+@keyframes swing2 {
+  0% {
+    transform: rotate(0deg);
+    animation-timing-function: linear;
+  }
+
+  50% {
+    transform: rotate(0deg);
+    animation-timing-function: ease-out;
+  }
+
+  75% {
+    transform: rotate(-50deg);
+    animation-timing-function: ease-in;
+  }
+}

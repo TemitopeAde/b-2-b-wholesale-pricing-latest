@@ -1,0 +1,95 @@
+.toggleList {
+  display: flex;
+  flex-direction: column;
+}
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--wh-line-soft);
+  cursor: pointer;
+  font-family: var(--wh-body);
+}
+
+.toggleRow:last-child {
+  border-bottom: 0;
+}
+
+.toggleRow:hover {
+  background: var(--wh-sunk);
+}
+
+.toggleIcon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  background: var(--wh-accent-tint);
+  color: var(--wh-accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.toggleText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggleLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--wh-ink);
+}
+
+.accordionTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+}
+
+.accordionSub {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--wh-muted);
+}
+
+.errorList {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.editor :global(.ql-toolbar.ql-snow) {
+  border: 1px solid var(--wh-field);
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  background: var(--wh-sunk);
+  font-family: var(--wh-body);
+}
+
+.editor :global(.ql-container.ql-snow) {
+  border: 1px solid var(--wh-field);
+  border-radius: 0 0 10px 10px;
+  font-family: var(--wh-body);
+  font-size: 14px;
+}
+
+.editor :global(.ql-editor) {
+  min-height: 160px;
+  line-height: 1.6;
+  color: var(--wh-ink);
+}
+
+.editor:focus-within :global(.ql-toolbar.ql-snow),
+.editor:focus-within :global(.ql-container.ql-snow) {
+  border-color: var(--wh-accent);
+}

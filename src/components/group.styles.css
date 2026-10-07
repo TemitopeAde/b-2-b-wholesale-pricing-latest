@@ -1,0 +1,273 @@
+/* Group Card Styles - group.styles.css */
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ─── Card base ─────────────────────────────────────────── */
+.group-card {
+  border: none;
+  border-radius: 14px;
+  padding: 0;
+  background: #ffffff;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07);
+  position: relative;
+  overflow: hidden;
+  transition: box-shadow 0.25s ease, transform 0.25s ease;
+  animation: fadeInUp 0.3s ease-out;
+  max-width: 100%;
+  min-height: 0;
+}
+
+/* Top accent stripe */
+.group-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #cbd5e1, #e2e8f0);
+  transition: background 0.25s ease;
+}
+
+.group-card-active::before {
+  background: linear-gradient(90deg, #10b981, #06d6a0);
+}
+
+.group-card-active {
+  box-shadow: 0 4px 20px rgba(16, 185, 129, 0.12);
+}
+
+.group-card:hover {
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.11);
+  transform: translateY(-2px);
+}
+
+.group-card:hover.group-card-active {
+  box-shadow: 0 10px 30px rgba(16, 185, 129, 0.2);
+}
+
+/* ─── Header ────────────────────────────────────────────── */
+.group-card-header {
+  padding: 1.1rem 1.1rem 0.6rem 1.1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.group-card-title-section {
+  flex: 1;
+}
+
+.group-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.group-card-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: #1a2e44;
+  font-family: 'Montserrat', sans-serif;
+  line-height: 1.25;
+}
+
+/* ─── Dropdown button ───────────────────────────────────── */
+.group-card-dropdown {
+  position: relative;
+}
+
+.group-card-dropdown-btn {
+  background: none;
+  border: none;
+  padding: 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: #7a92a5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, color 0.2s;
+}
+
+.group-card-dropdown-btn:hover {
+  background-color: #f0f4f8;
+  color: #32536a;
+}
+
+.group-card-dropdown-btn:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(17, 109, 255, 0.35);
+}
+
+/* ─── Members bubble ────────────────────────────────────── */
+.group-card-members {
+  display: flex;
+  justify-content: center;
+  padding: 0.6rem 1.1rem 0.9rem;
+}
+
+.group-card-members-content {
+  text-align: center;
+  background: #f8fafc;
+  border-radius: 12px;
+  padding: 10px 24px;
+  min-width: 80px;
+}
+
+.group-card-members-label {
+  display: block;
+  font-size: 0.58rem;
+  color: #7a92a5;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.group-card-members-count {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: #94a3b8;
+  font-family: 'Montserrat', sans-serif;
+  line-height: 1;
+}
+
+.group-card-members-count-active {
+  color: #10b981;
+}
+
+/* ─── Limits sections ───────────────────────────────────── */
+.group-card-limits-section {
+  padding: 0 1.1rem;
+  margin-bottom: 0.85rem;
+}
+
+.group-card-limits-title {
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: #7a92a5;
+  margin: 0 0 0.4rem 0;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.group-card-limits-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+}
+
+.group-card-order-limits .group-card-limit-item {
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 8px 10px;
+  text-align: center;
+}
+
+.group-card-product-limits .group-card-limit-item {
+  background: #f0f9ff;
+  border-radius: 8px;
+  padding: 8px 10px;
+  text-align: center;
+}
+
+.group-card-limit-item {
+  text-align: center;
+}
+
+.group-card-limit-label {
+  display: block;
+  font-size: 0.6rem;
+  color: #7a92a5;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+
+.group-card-limit-value {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: #1a2e44;
+  font-family: 'Montserrat', sans-serif;
+}
+
+.group-card-limit-value-unset {
+  color: #9ca3af;
+  font-weight: 400;
+  font-family: 'Open Sans', sans-serif;
+  font-style: italic;
+  font-size: 0.78rem;
+}
+
+/* ─── Status bar ────────────────────────────────────────── */
+.group-card-status {
+  margin: 0 0.8rem 0.8rem;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #fef3c7, #fde68a22);
+  border: none;
+}
+
+.group-card-status-active {
+  background: linear-gradient(135deg, #d1fae5, #a7f3d022);
+}
+
+.group-card-status-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-card-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background-color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.group-card-status-dot-active {
+  background-color: #10b981;
+}
+
+.group-card-status-text {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #92400e;
+}
+
+.group-card-status-text-active {
+  color: #065f46;
+}
+
+/* ─── Responsive ────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .group-card {
+    max-width: 100%;
+  }
+
+  .group-card-title {
+    font-size: 0.95rem;
+  }
+
+  .group-card-members-count {
+    font-size: 1.3rem;
+  }
+}
