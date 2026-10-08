@@ -2,7 +2,8 @@ import React, { type FC, useState, useEffect } from 'react';
 import { items } from "@wix/data";
 import { dashboard } from '@wix/dashboard';
 import { getCurrentMember } from '../utils/utils';
-import { getConfiguration, getContact, findContactByEmail, findOrCreateContactForApplication, sendNewApplicationNotificationToOwner, sendWholesaleApprovalEmail, sendWholesaleRejectionEmail, updateContact, getAllContacts, revokeWholesaleAccess } from '../backend/pricing.client';
+import { getAllContacts, getContact } from '../backend/pricing.client';
+import { createWholesaleApplication, reviewWholesaleApplication } from '../backend/wholesale.client';
 import { ApplicationForm } from './Application/ApplicationForm';
 import { StatsGrid } from './Application/StatsGrid';
 import { ApplicationsList } from './Application/ApplicationsList';
@@ -199,24 +200,11 @@ export const WholesaleApplicationsView: FC = () => {
         interestedProducts: data.interestedProducts,
         estimatedMonthlyVolume: data.estimatedMonthlyVolume,
         additionalInfo: data.additionalInfo,
-        status: 'pending',
-        submittedDate: new Date().toISOString(),
       };
 
-      const result = await items.save(COLLECTION_NAME, dataToInsert);
+      const result = await createWholesaleApplication(dataToInsert);
 
-      if (result._id) {
-        const config = await getConfiguration();
-        const shouldNotify = config?.notificationSettings?.customerRegistrations ?? true;
-
-        if (shouldNotify) {
-          try {
-            await sendNewApplicationNotificationToOwner(dataToInsert);
-          } catch {
-            // Ignore notification error
-          }
-        }
-
+      if (result['_id']) {
         setFormData({
           businessName: '', contactName: '', email: '', phone: '', businessType: '',
           yearsInBusiness: '', annualRevenue: '', numberOfLocations: '', resaleCertificate: '',
@@ -226,8 +214,8 @@ export const WholesaleApplicationsView: FC = () => {
         await fetchApplications();
         setActiveView('applications');
       }
-    } catch {
-      // Ignore submission error
+    } catch (error) {
+      dashboard.showToast({ message: error instanceof Error ? error.message : 'Unable to save application.', type: 'error' });
     } finally {
       setIsLoading(false);
     }
@@ -247,91 +235,11 @@ export const WholesaleApplicationsView: FC = () => {
         throw new Error('The application could not be found. Refresh the page and try again.');
       }
 
-      let contactId = application.contactId;
-      let response: any;
-
-      if (contactId) {
-        response = await getContact(contactId);
-      } else {
-        if (!application.email) {
-          throw new Error('This application has no contact ID or email address.');
-        }
-        if (status === 'approved') {
-          // Applicants who applied while logged out have no contact yet, so create one.
-          const { contact, created } = await findOrCreateContactForApplication({
-            email: application.email,
-            contactName: application.contactName,
-            businessName: application.businessName,
-            phone: application.phone,
-          });
-          console.log('[approve] findOrCreateContactForApplication', { contactId: contact?._id, created });
-          response = contact;
-        } else {
-          response = await findContactByEmail(application.email);
-        }
-        contactId = response?._id;
-        if (!contactId && status === 'approved') {
-          throw new Error(`No Wix contact could be found or created for ${application.email}.`);
-        }
-      }
-
-      if (contactId && (response?.revision === undefined || response?.revision === null)) {
-        throw new Error('The Wix contact has no revision and cannot be updated. Refresh and try again.');
-      }
-
-      const revision = Number(response?.revision);
-      let nextStatus: FormData['status'] = status;
-
-      if (status === "approved" && contactId) {
-        await updateContact(contactId, revision, "wholesale");
-        const verifiedContact = await getContact(contactId);
-        if (!isWholesaleContactResponse(verifiedContact)) {
-          throw new Error('The contact update could not be verified. Wholesale approval was not saved.');
-        }
-        nextStatus = 'approved';
-      } else if (status === "rejected" || status === "pending") {
-        // No contact means no wholesale flag to clear (the applicant was never approved).
-        if (contactId) {
-          await updateContact(contactId, revision, "");
-        }
-
-        if (application.memberId) {
-          const revokeResult = await revokeWholesaleAccess(application.memberId);
-          if (!revokeResult?.success) {
-            throw new Error(revokeResult?.error || 'Wholesale rule and access-group cleanup failed.');
-          }
-        }
-        nextStatus = status;
-      }
-
-      // items.update() replaces the whole item, so merge onto the stored fields.
-      const storedItem = await items.get(COLLECTION_NAME, id);
-      await items.update(COLLECTION_NAME, {
-        ...(storedItem || {}),
-        _id: id,
-        status: nextStatus,
-        contactId: contactId || storedItem?.contactId || null,
-      });
-
-      setApplications(prev => prev.map(app => app.id === id ? { ...app, status: nextStatus, contactId } : app));
+      const saved = await reviewWholesaleApplication(id, status);
+      const contactId = typeof saved['contactId'] === 'string' ? saved['contactId'] : application.contactId;
+      setApplications(prev => prev.map(app => app.id === id ? { ...app, status, contactId } : app));
       if (selectedApplication?.id === id) {
-        setSelectedApplication(prev => prev ? { ...prev, status: nextStatus, contactId } : null);
-      }
-
-      try {
-        const emailConfig = await getConfiguration();
-        const shouldSendEmail = status === 'approved'
-          ? emailConfig?.notificationSettings?.approvalEmails ?? true
-          : emailConfig?.notificationSettings?.rejectionEmails ?? true;
-        if (application.email && shouldSendEmail) {
-          if (status === 'approved') {
-            await sendWholesaleApprovalEmail(application.email);
-          } else {
-            await sendWholesaleRejectionEmail(application.email);
-          }
-        }
-      } catch (emailError) {
-        console.warn('Wholesale status saved, but notification email failed.', emailError);
+        setSelectedApplication(prev => prev ? { ...prev, status, contactId } : null);
       }
 
       dashboard.showToast({

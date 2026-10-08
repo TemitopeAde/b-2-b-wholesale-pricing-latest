@@ -1,7 +1,56 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ConfirmationModal from './ConfirmationModal';
-import ActionMenu, { EditIcon, DeleteIcon, ToggleIcon, MenuAction } from './PricingIcons';
+import { EditIcon, ModernDeleteIcon as DeleteIcon, ToggleIcon, MoreIcon } from './PricingIcons';
 import './ruleCards.styles.css';
+
+interface MenuAction {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
+  loading?: boolean;
+  variant?: 'danger';
+  color?: string;
+}
+
+const ActionMenu: React.FC<{ actions: MenuAction[]; position?: 'bottom-right' | 'bottom-left' }> = ({ actions, position = 'bottom-right' }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div ref={menuRef} style={{ position: 'relative' }}>
+      <button type="button" onClick={() => setIsOpen(!isOpen)} style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
+        <MoreIcon />
+      </button>
+      {isOpen && (
+        <div style={{ position: 'absolute', top: '100%', [position === 'bottom-right' ? 'right' : 'left']: 0, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, boxShadow: '0 4px 12px rgba(0,0,0,0.1)', zIndex: 10, minWidth: 160 }}>
+          {actions.map((action) => (
+            <button
+              key={action.key}
+              type="button"
+              disabled={action.loading}
+              onClick={() => { action.onClick(); setIsOpen(false); }}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '8px 12px', background: 'none', border: 'none', cursor: 'pointer', color: action.color }}
+            >
+              {action.icon}
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 // Rule Types
 export type RuleCategory = 'pricing' | 'moq' | string;
@@ -125,7 +174,7 @@ const RuleCards: React.FC<RuleCardsProps> = ({
       {
         key: 'toggle',
         label: rule.isActive ? 'Deactivate' : 'Activate',
-        icon: <ToggleIcon />,
+        icon: <ToggleIcon isActive={rule.isActive} />,
         onClick: handleToggle,
         loading: loadingActions[`toggle-${rule.id}`] || false,
         color: '#374151'

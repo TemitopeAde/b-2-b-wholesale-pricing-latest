@@ -1,8 +1,8 @@
-import React, { type FC, useState, useEffect, useRef } from 'react';
+import React, { type FC, useState, useEffect, useMemo, useRef } from 'react';
 import { Badge, Box, Button, CellStack, Checkbox, LoadingBlock, Modal, Pagination, Search } from './ui';
 import { DashIcons } from './Dashboard/icons';
 import m from './ManageMember.module.css';
-import { searchWholesaleContacts, queryAllRules, updateUnifiedRule } from '../backend/pricing.client';
+import { listWholesaleCustomers, updateWholesaleGroupMembers } from '../backend/wholesale.client';
 import { dashboard } from '@wix/dashboard';
 import { items } from "@wix/data";
 import { type AccessGroup } from './AccessGroupType';
@@ -62,15 +62,16 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
     const [removingMembers, setRemovingMembers] = useState<Set<string>>(new Set());
     const [isSaving, setIsSaving] = useState(false);
     const [contactsPage, setContactsPage] = useState(1);
+    const [membersPage, setMembersPage] = useState(1);
     const [selectedContacts, setSelectedContacts] = useState<Set<string>>(new Set());
-    const CONTACTS_PAGE_SIZE = 50;
+    const PAGE_SIZE = 100;
     const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const fetchContacts = async (search: string = '') => {
         try {
             setIsLoading(true);
-            const contacts = await searchWholesaleContacts(search);
-            setAllContacts(contacts || []);
+            const result = await listWholesaleCustomers(search);
+            setAllContacts(result.items.filter(contact => contact['memberInfo']));
         } catch {
             dashboard.showToast({
                 message: "Failed to load contacts",
@@ -115,11 +116,15 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
     // Server already filtered by search — use allContacts directly for pagination
     const filteredContacts = allContacts;
 
-    const isMemberInGroup = (memberId: string) => {
-        return groupMembers.some(member => member.id === memberId);
-    };
+    // Set lookup keeps "Add all" and the list fast with thousands of wholesale customers
+    const groupMemberIds = useMemo(() => new Set(groupMembers.map(member => member.id)), [groupMembers]);
+    const isMemberInGroup = (memberId: string) => groupMemberIds.has(memberId);
 
-    const pagedContacts = filteredContacts.slice((contactsPage - 1) * CONTACTS_PAGE_SIZE, contactsPage * CONTACTS_PAGE_SIZE);
+    const membersTotalPages = Math.max(1, Math.ceil(groupMembers.length / PAGE_SIZE));
+    const currentMembersPage = Math.min(membersPage, membersTotalPages);
+    const pagedMembers = groupMembers.slice((currentMembersPage - 1) * PAGE_SIZE, currentMembersPage * PAGE_SIZE);
+
+    const pagedContacts = filteredContacts.slice((contactsPage - 1) * PAGE_SIZE, contactsPage * PAGE_SIZE);
     const selectableIds = pagedContacts
         .map(c => c.memberInfo?.memberId || c._id || '')
         .filter(id => !isMemberInGroup(id));
@@ -156,6 +161,21 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
         setSelectedContacts(new Set());
         dashboard.showToast({
             message: `${newMembers.length} contact${newMembers.length !== 1 ? 's' : ''} added to ${selectedGroup.name}`,
+            type: 'success',
+            timeout: 'normal',
+        });
+    };
+
+    const addableContacts = filteredContacts.filter(c => !isMemberInGroup(c.memberInfo?.memberId || c._id || ''));
+
+    /** Stages every loaded wholesale customer (matching the current search) not already in the group. */
+    const handleAddAll = () => {
+        const newMembers = addableContacts.map(transformContact);
+        if (newMembers.length === 0) return;
+        setGroupMembers(prev => [...prev, ...newMembers]);
+        setSelectedContacts(new Set());
+        dashboard.showToast({
+            message: `${newMembers.length} wholesale customer${newMembers.length !== 1 ? 's' : ''} added to ${selectedGroup.name}`,
             type: 'success',
             timeout: 'normal',
         });
@@ -220,136 +240,22 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
         }
     };
 
-    const syncDiscountRules = async (newMembersArray: Member[], oldMembersArray: Member[]) => {
-        try {
-            const allRulesResponse = await queryAllRules();
-            const rules = (allRulesResponse as any).items || (allRulesResponse as any)._items;
-
-            if (rules) {
-                let syncedRulesCount = 0;
-                const deactivatedRuleNames: string[] = [];
-
-                const oldIds = new Set(oldMembersArray.map(m => m.id));
-                const newIds = new Set(newMembersArray.map(m => m.id));
-
-                const removedIds = oldMembersArray.filter(m => !newIds.has(m.id)).map(m => m.id);
-                const addedIds = newMembersArray.filter(m => !oldIds.has(m.id)).map(m => m.id);
-
-                for (const rule of rules) {
-                    const ruleMemberIds = rule.trigger?.customerEligibility?.individualMembersInfo?.memberIds || [];
-                    const offerString = rule.offer || '';
-                    
-                    // Check for group tag in description
-                    const groupTagMatch = offerString.match(/ \|\| Groups: (.*)$/);
-                    const assignedGroupIds = groupTagMatch ? groupTagMatch[1].split(',').map((s: string) => s.trim()) : [];
-                    
-                    const isDirectlyAttached = assignedGroupIds.includes(selectedGroup.id);
-                    const isHeuristicallyAttached = !isDirectlyAttached && oldMembersArray.length > 0 &&
-                        oldMembersArray.every(m => ruleMemberIds.includes(m.id));
-
-                    if (isDirectlyAttached || isHeuristicallyAttached) {
-                        let updatedRuleMemberIds: string[] = [];
-
-                        if (isDirectlyAttached) {
-                            // Precise sync: Re-calculate members from all assigned groups
-                            const memberIdSet = new Set<string>();
-                            
-                            // 1. Add members from ALL groups tagged in the rule
-                            assignedGroupIds.forEach((groupId: string) => {
-                                const group = (groupId === selectedGroup.id) 
-                                    ? { ...selectedGroup, members: newMembersArray } // Use current updated state for the active group
-                                    : allGroups.find((g: any) => g.id === groupId);
-                                
-                                if (group && group.members) {
-                                    group.members.forEach((m: any) => memberIdSet.add(m.id));
-                                }
-                            });
-                            
-                            // 2. Preserve any individual members that weren't from the groups originally
-                            const allOldGroupMemberIds = new Set<string>();
-                            assignedGroupIds.forEach((groupId: string) => {
-                                const group = (groupId === selectedGroup.id) ? selectedGroup : allGroups.find((g: any) => g.id === groupId);
-                                if (group && group.members) {
-                                    group.members.forEach((m: any) => allOldGroupMemberIds.add(m.id));
-                                }
-                            });
-                            
-                            ruleMemberIds.forEach((id: string) => {
-                                if (!allOldGroupMemberIds.has(id)) {
-                                    memberIdSet.add(id);
-                                }
-                            });
-                            
-                            updatedRuleMemberIds = Array.from(memberIdSet);
-                        } else {
-                            // Fallback heuristic sync
-                            updatedRuleMemberIds = [...ruleMemberIds];
-                            updatedRuleMemberIds = updatedRuleMemberIds.filter(id => !removedIds.includes(id));
-                            addedIds.forEach(id => {
-                                if (!updatedRuleMemberIds.includes(id)) {
-                                    updatedRuleMemberIds.push(id);
-                                }
-                            });
-                        }
-
-                        if (rule._id) {
-                            if (updatedRuleMemberIds.length === 0) {
-                                    await updateUnifiedRule(rule._id, {
-                                        memberIds: [],
-                                        active: false,
-                                        description: offerString // Keep the tag!
-                                    });
-                                deactivatedRuleNames.push(rule.name || rule._id);
-                            } else {
-                                await updateUnifiedRule(rule._id, {
-                                    memberIds: updatedRuleMemberIds,
-                                    description: offerString // Keep the tag!
-                                });
-                            }
-                            syncedRulesCount++;
-                        }
-                    }
-                }
-
-                if (deactivatedRuleNames.length > 0) {
-                    dashboard.showToast({
-                        message: `The following discount rule(s) were deactivated: ${deactivatedRuleNames.join(', ')}.`,
-                        type: "warning",
-                        timeout: "normal"
-                    });
-                } else if (syncedRulesCount > 0) {
-                    dashboard.showToast({
-                        message: `Auto-synced ${syncedRulesCount} attached discount rule(s)`,
-                        type: "success",
-                        timeout: "normal"
-                    });
-                }
-            }
-        } catch {
-            // Ignore sync error
-        }
-    };
-
     const handleSaveChanges = async () => {
         try {
             setIsSaving(true);
-            const dataToUpdate = {
-                _id: selectedGroup.id,
-                name: selectedGroup.name,
-                minProducts: selectedGroup.minProducts,
-                maxProducts: selectedGroup.maxProducts,
-                minOrder: selectedGroup.minOrder,
-                maxOrder: selectedGroup.maxOrder,
-                members: groupMembers,
-            };
-
-            await items.update(COLLECTION_NAME, dataToUpdate);
-            await syncDiscountRules(groupMembers, selectedGroup.members || []);
+            // Send only what changed; the server applies it to the stored list
+            const originalIds = new Set((selectedGroup.members || []).map(m => m.id));
+            const currentIds = new Set(groupMembers.map(m => m.id));
+            const add = groupMembers.filter(m => !originalIds.has(m.id)).map(({ id, name, email }) => ({ id, name, email }));
+            const remove = [...originalIds].filter(id => !currentIds.has(id));
+            const saved: any = add.length || remove.length
+                ? await updateWholesaleGroupMembers(selectedGroup.id, { add, remove })
+                : null;
 
             if (onUpdateGroup) {
                 onUpdateGroup({
                     ...selectedGroup,
-                    members: groupMembers
+                    members: Array.isArray(saved?.members) ? saved.members : groupMembers
                 });
             }
 
@@ -359,9 +265,9 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
                 timeout: "normal"
             });
             onClose();
-        } catch {
+        } catch (error) {
             dashboard.showToast({
-                message: "Failed to save changes",
+                message: error instanceof Error ? error.message : "Failed to save changes",
                 type: "error",
                 timeout: "normal"
             });
@@ -401,7 +307,7 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
                         {groupMembers.length === 0 ? (
                             <div className={m.listEmpty}>No members in this group yet. Add customers from the list on the right.</div>
                         ) : (
-                            groupMembers.map((member) => (
+                            pagedMembers.map((member) => (
                                 <div key={member.id} className={m.row}>
                                     <span className={m.avatar} aria-hidden="true">{initials(displayName(member.name, member.email))}</span>
                                     <CellStack
@@ -420,6 +326,15 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
                             ))
                         )}
                     </div>
+                    {groupMembers.length > PAGE_SIZE && (
+                        <Box align="center">
+                            <Pagination
+                                currentPage={currentMembersPage}
+                                totalPages={membersTotalPages}
+                                onChange={({ page }) => setMembersPage(page)}
+                            />
+                        </Box>
+                    )}
                 </section>
 
                 <section className={`${m.section} ${m.customers}`} aria-labelledby="available-customers">
@@ -432,6 +347,11 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
                         {selectedContacts.size > 0 && (
                             <Button size="small" onClick={handleBulkAdd} prefixIcon={<DashIcons.Plus size={14} />}>
                                 Add {selectedContacts.size} selected
+                            </Button>
+                        )}
+                        {!isLoading && addableContacts.length > 0 && (
+                            <Button size="small" variant="secondary" onClick={handleAddAll} prefixIcon={<DashIcons.Plus size={14} />}>
+                                {searchQuery ? `Add all ${addableContacts.length} matching` : `Add all ${addableContacts.length}`}
                             </Button>
                         )}
                     </div>
@@ -507,11 +427,11 @@ const ManageMember: FC<ManageMemberProps> = ({ selectedGroup, onClose, onUpdateG
                         </div>
                     )}
 
-                    {filteredContacts.length > CONTACTS_PAGE_SIZE && (
+                    {filteredContacts.length > PAGE_SIZE && (
                         <Box align="center">
                             <Pagination
                                 currentPage={contactsPage}
-                                totalPages={Math.ceil(filteredContacts.length / CONTACTS_PAGE_SIZE)}
+                                totalPages={Math.ceil(filteredContacts.length / PAGE_SIZE)}
                                 onChange={({ page }) => setContactsPage(page)}
                             />
                         </Box>

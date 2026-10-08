@@ -1306,6 +1306,9 @@ export const RowActions: FC<{
 // Modal
 // ---------------------------------------------------------------------------
 
+/** Open modals, innermost last — only the top one handles Esc/Tab when modals stack. */
+const openModals: object[] = [];
+
 const MODAL_SIZE: Record<string, string> = {
     small: s.modalSmall, medium: s.modalMedium, large: s.modalLarge, xlarge: s.modalXLarge,
 };
@@ -1347,7 +1350,11 @@ export const Modal: FC<ModalProps> = ({
         );
         (focusable || dialog)?.focus();
 
+        const token = {};
+        openModals.push(token);
+
         const onKeyDown = (e: KeyboardEvent) => {
+            if (openModals[openModals.length - 1] !== token) return;
             if (e.key === 'Escape' && !busyRef.current) {
                 e.stopPropagation();
                 onCloseRef.current();
@@ -1368,6 +1375,7 @@ export const Modal: FC<ModalProps> = ({
         document.body.style.overflow = 'hidden';
         return () => {
             document.removeEventListener('keydown', onKeyDown);
+            openModals.splice(openModals.indexOf(token), 1);
             document.body.style.overflow = prevOverflow;
             previouslyFocused?.focus?.();
         };

@@ -42,6 +42,7 @@ import {
   CellStack,
   Checkbox,
   type Column,
+  ConfirmDialog,
   DataTable,
   Dropdown,
   EmptyState,
@@ -218,6 +219,8 @@ export const PricingRulesView: FC = () => {
     totalCount: 0,
     pageSize: 20,
   });
+  const [memberToRemove, setMemberToRemove] = useState<{ id: string; name: string } | null>(null);
+  const [removingMember, setRemovingMember] = useState(false);
 
   useEffect(() => {
     const initializeData = async () => {
@@ -570,7 +573,10 @@ export const PricingRulesView: FC = () => {
   const handleViewMembers = async (rule: PricingRule, page: number = 1) => {
     setViewMembersModal(prev => ({ ...prev, isOpen: true, rule, currentPage: page, isLoading: true }));
     try {
-      const allIds = Array.from(new Set([...(rule.memberIds || []), ...(rule.accessGroups || []).flatMap(gid => accessGroups.find(g => g.id === gid)?.members.map(m => m.id) || [])]));
+      // Pricing rules carry their real eligibility list; fall back to group members otherwise
+      const allIds = rule.ruleCategory === 'pricing' && rule.memberIds?.length
+        ? Array.from(new Set(rule.memberIds))
+        : Array.from(new Set([...(rule.memberIds || []), ...(rule.accessGroups || []).flatMap(gid => accessGroups.find(g => g.id === gid)?.members.map(m => m.id) || [])]));
       if (allIds.length === 0) {
         setViewMembersModal(prev => ({ ...prev, isLoading: false, members: [], totalCount: 0, allMemberIds: [] }));
         return;
@@ -592,6 +598,36 @@ export const PricingRulesView: FC = () => {
       setViewMembersModal(prev => ({ ...prev, members, totalCount: total, isLoading: false }));
     } catch (e) {
       setViewMembersModal(prev => ({ ...prev, isLoading: false }));
+    }
+  };
+
+  const handleRemoveMemberFromRule = async () => {
+    const { rule, allMemberIds, currentPage, pageSize } = viewMembersModal;
+    if (!rule || !memberToRemove) return;
+    setRemovingMember(true);
+    try {
+      const memberIds = allMemberIds.filter(id => id !== memberToRemove.id);
+      // Wix recreates the discount rule on update, so the rule id changes
+      const result: any = await updateUnifiedRule(rule.id, { memberIds, ...(memberIds.length === 0 ? { active: false } : {}) });
+      const updatedRule = { ...rule, id: result?.data?._id || rule.id, memberIds, isActive: memberIds.length === 0 ? false : rule.isActive };
+      const lastPage = Math.max(1, Math.ceil(memberIds.length / pageSize));
+      const page = Math.min(currentPage, lastPage);
+      const { members, total } = memberIds.length
+        ? await getMembersByIds(memberIds, pageSize, (page - 1) * pageSize)
+        : { members: [], total: 0 };
+      setViewMembersModal(prev => ({ ...prev, rule: updatedRule, allMemberIds: memberIds, members, totalCount: total, currentPage: page }));
+      dashboard.showToast({
+        message: memberIds.length === 0
+          ? `${memberToRemove.name} removed. The rule has no members left, so it was deactivated.`
+          : `${memberToRemove.name} removed from this rule`,
+        type: 'success',
+      });
+      setMemberToRemove(null);
+      fetchEnhancedRules();
+    } catch (e: any) {
+      dashboard.showToast({ message: `Error: ${e.message}`, type: 'error' });
+    } finally {
+      setRemovingMember(false);
     }
   };
 
@@ -861,6 +897,8 @@ export const PricingRulesView: FC = () => {
           accessGroups={accessGroups}
           loadingCatalog={loadingCatalog}
           loadingAccessGroups={loadingAccessGroups}
+          setAccessGroups={setAccessGroups}
+          onAccessGroupsChanged={fetchEnhancedRules}
         />
       )}
 
@@ -875,6 +913,8 @@ export const PricingRulesView: FC = () => {
           accessGroups={accessGroups}
           loadingCatalog={loadingCatalog}
           loadingAccessGroups={loadingAccessGroups}
+          setAccessGroups={setAccessGroups}
+          onAccessGroupsChanged={fetchEnhancedRules}
         />
       )}
 
@@ -935,6 +975,24 @@ export const PricingRulesView: FC = () => {
                     render: (m: any) => `${m.contact?.firstName || ''} ${m.contact?.lastName || ''}`.trim() || m.loginEmail || 'Unknown',
                   },
                   { title: 'Email', render: (m: any) => m.loginEmail || '—' },
+                  ...(viewMembersModal.rule?.ruleCategory === 'pricing' ? [{
+                    title: <VisuallyHidden>Actions</VisuallyHidden>,
+                    align: 'right' as const,
+                    width: '110px',
+                    render: (m: any) => (
+                      <Button
+                        size="small"
+                        variant="secondary"
+                        prefixIcon={<DashIcons.Trash size={14} />}
+                        onClick={() => setMemberToRemove({
+                          id: m._id,
+                          name: `${m.contact?.firstName || ''} ${m.contact?.lastName || ''}`.trim() || m.loginEmail || 'This member',
+                        })}
+                      >
+                        Remove
+                      </Button>
+                    ),
+                  }] : []),
                 ]}
               />
             </Card>
@@ -953,6 +1011,18 @@ export const PricingRulesView: FC = () => {
           </Box>
         )}
       </Modal>
+
+      <ConfirmDialog
+        isOpen={!!memberToRemove}
+        title="Remove member from rule?"
+        message={`${memberToRemove?.name} will no longer get "${viewMembersModal.rule?.name}".`}
+        subMessage={viewMembersModal.allMemberIds.length === 1 ? 'This is the last member on the rule, so the rule will be deactivated.' : undefined}
+        confirmText="Remove"
+        tone="danger"
+        isLoading={removingMember}
+        onConfirm={handleRemoveMemberFromRule}
+        onCancel={() => !removingMember && setMemberToRemove(null)}
+      />
 
       {showScrollTop && <ScrollTopButton onClick={scrollToTop} />}
     </Page>

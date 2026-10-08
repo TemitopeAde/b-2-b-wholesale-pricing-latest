@@ -1,0 +1,98 @@
+.root {
+  width: 100%;
+  font-family: inherit;
+}
+
+.value {
+  color: inherit;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: inherit;
+  line-height: 1.2;
+  margin: 8px 0 0;
+  text-decoration: inherit;
+  text-transform: inherit;
+  white-space: inherit;
+}
+
+.loaderRow {
+  align-items: center;
+  display: flex;
+  min-height: 20px;
+}
+
+.loader {
+  display: inline-block;
+  height: 18px;
+  overflow: visible;
+  width: 40px;
+}
+
+.loaderDotFirst {
+  animation: swing 1.2s linear infinite;
+  transform-origin: center top;
+}
+
+.loaderDotSecond {
+  animation: swing2 1.2s linear infinite;
+  transform-origin: center top;
+}
+
+@keyframes swing {
+  0% {
+    transform: rotate(0deg);
+    animation-timing-function: ease-out;
+  }
+
+  25% {
+    transform: rotate(50deg);
+    animation-timing-function: ease-in;
+  }
+
+  50% {
+    transform: rotate(0deg);
+    animation-timing-function: linear;
+  }
+}
+
+@keyframes swing2 {
+  0% {
+    transform: rotate(0deg);
+    animation-timing-function: linear;
+  }
+
+  50% {
+    transform: rotate(0deg);
+    animation-timing-function: ease-out;
+  }
+
+  75% {
+    transform: rotate(-50deg);
+    animation-timing-function: ease-in;
+  }
+}
+
+:global(.wd-wholesale-add-to-cart) {
+  margin-bottom: 12px;
+}
+
+:global(.wd-wholesale-add-to-cart button),
+.injectedButton {
+  background: #000 !important;
+  border-color: #000 !important;
+  color: #fff !important;
+  height: 50px !important;
+  min-height: 50px !important;
+}
+
+:global(.wd-wholesale-add-to-cart [data-testid="stylablebutton-label"]),
+.injectedButton :global(.wixui-button__label) {
+  color: #fff !important;
+}
+
+:global(.wd-wholesale-add-to-cart button:hover),
+.injectedButton:hover {
+  background: #111 !important;
+  border-color: #111 !important;
+}

@@ -1,4 +1,4 @@
-import React, { type FC, useEffect, useState } from 'react';
+import React, { type Dispatch, type FC, type SetStateAction, useEffect, useState } from 'react';
 import DatePicker from 'react-datepicker';
 import 'react-datepicker/dist/react-datepicker.css';
 import {
@@ -18,6 +18,7 @@ import {
   Divider,
   Modal,
   Tabs,
+  TextButton,
 } from './ui';
 import { DashIcons } from './Dashboard/icons';
 import rf from './RuleForm.module.css';
@@ -25,6 +26,13 @@ import { processBulkCsvData } from '../backend/pricing.client';
 import { dashboard } from '@wix/dashboard';
 import { useAppInstance } from '../utils/appInstance';
 import { currencySymbol, useSiteCurrency } from '../utils/currency';
+import { CreateGroupModal } from './CreateGroupModal';
+import { listWholesaleCustomers, updateWholesaleGroupMembers } from '../backend/wholesale.client';
+import { type LoadingActions, type NewAccessGroup } from './AccessGroupType';
+
+interface Wholesaler { id: string; name: string; email: string }
+
+const EMPTY_GROUP: NewAccessGroup = { name: '', minOrder: '', maxOrder: '', minProducts: '', maxProducts: '' };
 
 interface RuleFormProps {
   mode: 'create' | 'edit';
@@ -36,6 +44,10 @@ interface RuleFormProps {
   accessGroups: any[];
   loadingCatalog: boolean;
   loadingAccessGroups: boolean;
+  /** Enables the "Create access group" shortcut when no groups exist */
+  setAccessGroups?: Dispatch<SetStateAction<any[]>>;
+  /** Called after wholesalers were placed into an access group, whose sync recreates that group's rules */
+  onAccessGroupsChanged?: () => void;
   isFree?: boolean;
   pricingRulesCount?: number;
   moqRulesCount?: number;
@@ -57,6 +69,8 @@ interface FormData {
   categoryIds: string[]; // For categories
   targetName: string;
   accessGroups: string[];
+  /** Wholesalers added to a pricing rule individually, on top of its access groups */
+  memberIds: string[];
   isActive: boolean;
   ruleCategory: 'pricing' | 'moq' | 'shipping';
   startDate: Date | null;
@@ -83,21 +97,34 @@ export const RuleForm: FC<RuleFormProps> = ({
   accessGroups,
   loadingCatalog,
   loadingAccessGroups,
+  setAccessGroups,
+  onAccessGroupsChanged,
   isFree = false,
   pricingRulesCount = 0,
   moqRulesCount = 0,
   shippingRulesCount = 0,
   b2cShippingRulesCount = 0,
 }) => {
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [newGroup, setNewGroup] = useState<NewAccessGroup>(EMPTY_GROUP);
+  const [groupLoadingActions, setGroupLoadingActions] = useState<LoadingActions>({});
+  // Rules saved without group tags store the group's members as plain IDs. A group counts as
+  // selected when the rule holds most of its members, so a group that grew since still shows ticked.
+  const [inferredGroups] = useState<{ id: string; coveredIds: string[]; total: number }[]>(() => {
+    if ((rule?.accessGroups || []).length > 0 || !rule?.memberIds?.length || rule?.ruleCategory !== 'pricing') return [];
+    const ruleIds = new Set<string>(rule.memberIds);
+    return accessGroups.flatMap(group => {
+      const members = group.members || [];
+      const coveredIds = members.map((m: any) => m.id).filter((id: string) => ruleIds.has(id));
+      return members.length > 0 && coveredIds.length / members.length > 0.5
+        ? [{ id: group.id, coveredIds, total: members.length }]
+        : [];
+    });
+  });
   const [formData, setFormData] = useState<FormData>(() => {
-    let initialAccessGroups = rule?.accessGroups || [];
-    
-    // Only infer from memberIds if initialAccessGroups is empty
-    if (initialAccessGroups.length === 0 && rule?.memberIds && rule.memberIds.length > 0 && rule?.ruleCategory === 'pricing') {
-      initialAccessGroups = accessGroups
-        .filter(group => group.members.length > 0 && group.members.every((m: any) => rule.memberIds.includes(m.id)))
-        .map((g: any) => g.id);
-    }
+    const initialAccessGroups = inferredGroups.length > 0
+      ? inferredGroups.map(group => group.id)
+      : rule?.accessGroups || [];
 
     const initialData = {
       name: rule?.name || '',
@@ -115,6 +142,12 @@ export const RuleForm: FC<RuleFormProps> = ({
       categoryIds: rule?.targetCategories || (rule?.type === 'category' && rule?.targetId ? [rule.targetId] : []),
       targetName: rule?.ruleCategory === 'moq' ? '' : (rule?.targetName || ''),
       accessGroups: initialAccessGroups,
+      memberIds: rule?.ruleCategory === 'pricing' ? (() => {
+        const groupMemberIds = new Set(accessGroups
+          .filter(group => initialAccessGroups.includes(group.id))
+          .flatMap(group => (group.members || []).map((m: any) => m.id)));
+        return (rule?.memberIds || []).filter((id: string) => !groupMemberIds.has(id));
+      })() : [],
       isActive: rule?.isActive !== false,
       ruleCategory: rule?.ruleCategory || 'pricing',
       startDate: rule?.startDate ? new Date(rule.startDate) : null,
@@ -280,7 +313,12 @@ export const RuleForm: FC<RuleFormProps> = ({
 
     // Access group validation (skipped for all shipping rules)
     const skipAccessGroupValidation = formData.ruleCategory === 'shipping';
-    if (!skipAccessGroupValidation && accessGroups.length === 0) {
+    const allowsDirectMembers = formData.ruleCategory === 'pricing';
+    if (allowsDirectMembers && formData.accessGroups.length === 0) {
+      if (formData.memberIds.length === 0) {
+        newErrors.push('Select at least one access group or wholesaler for this rule.');
+      }
+    } else if (!skipAccessGroupValidation && accessGroups.length === 0) {
       newErrors.push('No access groups exist. Please create an access group with members before creating a discount rule.');
     } else if (!skipAccessGroupValidation && formData.accessGroups.length === 0) {
       newErrors.push('Please select at least one access group. Discount rules must be assigned to a specific customer group.');
@@ -296,6 +334,35 @@ export const RuleForm: FC<RuleFormProps> = ({
     }
 
     return newErrors;
+  };
+
+  /** Wholesalers added directly but in no access group yet join one, so group-based checks (MOQ, shipping, storefront) include them. */
+  const addUngroupedWholesalersToGroup = async (): Promise<boolean> => {
+    const grouped = new Set(accessGroups.flatMap(group => (group.members || []).map((m: any) => m.id)));
+    const ungrouped = formData.memberIds.filter(id => !grouped.has(id));
+    if (ungrouped.length === 0) return false;
+
+    const target = accessGroups.find(group => group.id === formData.accessGroups[0]) || accessGroups[0];
+    if (!target) {
+      dashboard.showToast({ message: 'No access group exists, so the added wholesalers were not placed in one. Create a group to include them in MOQ and shipping rules.', type: 'warning', timeout: 'normal' });
+      return false;
+    }
+
+    const added = ungrouped.map(id => {
+      const wholesaler = wholesalers?.find(w => w.id === id);
+      return { id, name: wholesaler?.name || '', email: wholesaler?.email || '' };
+    });
+    try {
+      const saved: any = await updateWholesaleGroupMembers(String(target.id), { add: added });
+      const members = Array.isArray(saved?.members) ? saved.members : [...(target.members || []), ...added];
+      setAccessGroups?.(prev => prev.map(group => group.id === target.id ? { ...group, members } : group));
+      dashboard.showToast({ message: `Added ${ungrouped.length} wholesaler${ungrouped.length === 1 ? '' : 's'} to the "${target.name || 'Unnamed'}" access group.`, type: 'success', timeout: 'normal' });
+      return true;
+    } catch (error) {
+      // The rule still targets them directly, so keep saving it.
+      dashboard.showToast({ message: `Couldn't add wholesalers to "${target.name || 'Unnamed'}": ${error instanceof Error ? error.message : 'unknown error'}`, type: 'warning', timeout: 'normal' });
+      return false;
+    }
   };
 
   const handleSubmit = async () => {
@@ -318,6 +385,8 @@ export const RuleForm: FC<RuleFormProps> = ({
       };
 
       await onSubmit(submitData);
+      // After the rule is saved: joining a group re-syncs that group's rules (new rule IDs), so refetch them.
+      if (formData.ruleCategory === 'pricing' && await addUngroupedWholesalersToGroup()) onAccessGroupsChanged?.();
     } catch {
       setErrors(['Failed to save rule. Please try again.']);
     } finally {
@@ -546,6 +615,27 @@ export const RuleForm: FC<RuleFormProps> = ({
   const isMultiTarget =
     (formData.type === 'category' && formData.categoryIds.length > 1) ||
     (formData.type === 'product' && formData.targetIds.length > 1);
+
+  const [wholesalers, setWholesalers] = useState<Wholesaler[] | null>(null);
+  const [wholesalerSearch, setWholesalerSearch] = useState('');
+  // Rules can hold hundreds of direct wholesalers; keep their chips collapsed unless asked for
+  const [showWholesalerTags, setShowWholesalerTags] = useState(false);
+
+  useEffect(() => {
+    if (formData.ruleCategory !== 'pricing' || wholesalers) return;
+    listWholesaleCustomers()
+      .then(({ items }) => setWholesalers(items.flatMap((contact: any) => {
+        const memberId = contact.memberInfo?.memberId;
+        if (!memberId) return [];
+        const name = [contact.info?.name?.first, contact.info?.name?.last].filter(Boolean).join(' ');
+        const email = contact.primaryInfo?.email || contact.memberInfo?.email || contact.info?.emails?.items?.[0]?.email || '';
+        return [{ id: memberId, name: name || email || 'Unnamed customer', email }];
+      })))
+      .catch(() => {
+        setWholesalers([]);
+        dashboard.showToast({ message: 'Failed to load wholesale customers', type: 'error', timeout: 'normal' });
+      });
+  }, [formData.ruleCategory]);
 
   useEffect(() => {
     if (isMultiTarget && formData.discountType !== 'percentage') {
@@ -1134,18 +1224,38 @@ export const RuleForm: FC<RuleFormProps> = ({
           {formData.ruleCategory !== 'shipping' && (
             <Box direction="vertical" gap="small">
               <Heading appearance="H4" className={rf.sectionTitle}>Access Control</Heading>
-              <Text secondary size="small">Select which customer groups this rule applies to.</Text>
+              <Text secondary size="small">
+                {formData.ruleCategory === 'pricing'
+                  ? 'Select the customer groups this rule applies to, add individual wholesalers, or both.'
+                  : 'Select which customer groups this rule applies to.'}
+              </Text>
               {loadingAccessGroups ? (
                 <Box verticalAlign="middle" gap="small">
                   <Loader size="tiny" />
                   <Text>Loading access groups...</Text>
                 </Box>
               ) : accessGroups.length === 0 ? (
-                <Notification theme="warning" type="sticky">
-                  No access groups available. Create an access group first.
-                </Notification>
+                <Box direction="vertical" gap="small">
+                  <Notification theme="warning" type="sticky">
+                    No access groups available. Create an access group first.
+                  </Notification>
+                  {setAccessGroups && (
+                    <Box>
+                      <Button size="small" variant="secondary" onClick={() => setShowCreateGroup(true)}>
+                        + Create access group
+                      </Button>
+                    </Box>
+                  )}
+                </Box>
               ) : (
                 <Box direction="vertical" gap="extraSmall">
+                  {inferredGroups
+                    .filter(inferred => inferred.coveredIds.length < inferred.total && formData.accessGroups.includes(inferred.id))
+                    .map(inferred => (
+                      <Notification key={inferred.id} theme="standard">
+                        {accessGroups.find(group => group.id === inferred.id)?.name || 'This group'} was selected because this rule already covers {inferred.coveredIds.length} of its {inferred.total} members. Saving will apply the rule to all members of the group.
+                      </Notification>
+                    ))}
                   {accessGroups.map(group => {
                     const memberCount = group.members?.length ?? 0;
                     const hasNoMembers = memberCount === 0;
@@ -1159,7 +1269,13 @@ export const RuleForm: FC<RuleFormProps> = ({
                           if (checked) {
                             setFormData(prev => ({ ...prev, accessGroups: [...prev.accessGroups, group.id] }));
                           } else {
-                            setFormData(prev => ({ ...prev, accessGroups: prev.accessGroups.filter(id => id !== group.id) }));
+                            // Unticking an inferred group hands its members back as individual wholesalers
+                            const restored = inferredGroups.find(inferred => inferred.id === group.id)?.coveredIds || [];
+                            setFormData(prev => ({
+                              ...prev,
+                              accessGroups: prev.accessGroups.filter(id => id !== group.id),
+                              memberIds: [...new Set([...prev.memberIds, ...restored])],
+                            }));
                           }
                         }}
                       >
@@ -1171,21 +1287,61 @@ export const RuleForm: FC<RuleFormProps> = ({
                       </Checkbox>
                     );
                   })}
-                  {(() => {
-                    if (formData.accessGroups.length === 0) return null;
-                    const matchedGroups = formData.accessGroups.map(id => accessGroups.find((g: any) => g.id === id)).filter(Boolean);
-                    const totalSelected = Array.from(new Set(matchedGroups.flatMap((g: any) => g.members?.map((m: any) => m.id) || []))).length;
-                    const isLarge = totalSelected > 100;
-                    return (
-                      <Notice tone={isLarge ? 'warning' : 'info'}>
-                        {isLarge
-                          ? `${totalSelected} members selected. That's over the 100-member limit per rule, so the rule will be split into batches of 100 automatically.`
-                          : `${totalSelected} member${totalSelected !== 1 ? 's' : ''} will get this rule.`}
-                      </Notice>
-                    );
-                  })()}
                 </Box>
               )}
+              {formData.ruleCategory === 'pricing' && (
+                <FormField label="Wholesalers">
+                  <Box direction="vertical" gap="extraSmall">
+                    <MultiSelect
+                      options={(wholesalers || [])
+                        .filter(w => !formData.memberIds.includes(w.id))
+                        .map(w => ({ id: w.id, value: w.email ? `${w.name} (${w.email})` : w.name }))}
+                      tags={showWholesalerTags ? formData.memberIds.map(id => {
+                        const wholesaler = wholesalers?.find(w => w.id === id);
+                        return { id, label: wholesaler ? wholesaler.name : 'Wholesale customer' };
+                      }) : []}
+                      onSelect={(opt: any) => setFormData(prev => ({ ...prev, memberIds: [...prev.memberIds, String(opt.id)] }))}
+                      onRemoveTag={(id) => setFormData(prev => ({ ...prev, memberIds: prev.memberIds.filter(m => m !== id) }))}
+                      value={wholesalerSearch}
+                      onChange={(e) => setWholesalerSearch(e.target.value)}
+                      placeholder={wholesalers ? 'Search wholesalers by name or email' : 'Loading wholesalers…'}
+                      disabled={!wholesalers}
+                      emptyMessage="No approved wholesalers match"
+                    />
+                    {formData.memberIds.length > 0 && (
+                      <Box verticalAlign="middle" gap="small">
+                        <Text size="small">
+                          {formData.memberIds.length} wholesaler{formData.memberIds.length === 1 ? '' : 's'} added individually
+                        </Text>
+                        <TextButton size="small" onClick={() => setShowWholesalerTags(prev => !prev)}>
+                          {showWholesalerTags ? 'Hide list' : 'Show list'}
+                        </TextButton>
+                        <TextButton size="small" onClick={() => setFormData(prev => ({ ...prev, memberIds: [] }))}>
+                          Clear all
+                        </TextButton>
+                      </Box>
+                    )}
+                    <Text size="tiny" secondary>
+                      Add approved wholesalers directly. Anyone not yet in an access group is added to {formData.accessGroups.length > 0 ? 'the first selected group' : 'an existing group'} when you save.
+                    </Text>
+                  </Box>
+                </FormField>
+              )}
+              {(() => {
+                const matchedGroups = formData.accessGroups.map(id => accessGroups.find((g: any) => g.id === id)).filter(Boolean);
+                const groupMemberIds = matchedGroups.flatMap((g: any) => g.members?.map((m: any) => m.id) || []);
+                const directIds = formData.ruleCategory === 'pricing' ? formData.memberIds : [];
+                const totalSelected = new Set([...groupMemberIds, ...directIds]).size;
+                if (totalSelected === 0) return null;
+                const isLarge = totalSelected > 100;
+                return (
+                  <Notice tone={isLarge ? 'warning' : 'info'}>
+                    {isLarge
+                      ? `${totalSelected} members selected. That's over the 100-member limit per rule, so the rule will be split into batches of 100 automatically.`
+                      : `${totalSelected} member${totalSelected !== 1 ? 's' : ''} will get this rule.`}
+                  </Notice>
+                );
+              })()}
             </Box>
           )}
 
@@ -1222,6 +1378,17 @@ export const RuleForm: FC<RuleFormProps> = ({
           )}
         </Box>
 
+      {setAccessGroups && (
+        <CreateGroupModal
+          showCreateForm={showCreateGroup}
+          newGroup={newGroup}
+          setNewGroup={setNewGroup}
+          setShowCreateForm={setShowCreateGroup}
+          setGroups={setAccessGroups}
+          loadingActions={groupLoadingActions}
+          setLoadingActions={setGroupLoadingActions}
+        />
+      )}
     </Modal>
   );
 };

@@ -1,3 +1,4 @@
+import { saveWholesaleGroup, deleteWholesaleGroup } from '../backend/wholesale.client';
 import { items } from '@wix/data';
 import { dashboard } from '@wix/dashboard';
 import { type AccessGroup, type NewAccessGroup, type SetActiveDropdown, type SetEditGroup, type SetGroups, type SetLoadingActions, type SetLoadingData, type SetNewGroup, type SetSelectedGroup, type SetShowCreateForm, type SetShowEditForm, type SetShowMembersModal } from './AccessGroupType';
@@ -56,9 +57,9 @@ export const createDefaultGroups = async (setGroups: SetGroups) => {
     try {
         const createdGroups: AccessGroup[] = [];
         for (const group of defaultGroups) {
-            const result = await items.insert(COLLECTION_NAME, { ...group, members: [] });
+            const result = await saveWholesaleGroup({ ...group, members: [] });
             createdGroups.push({
-                id: result._id,
+                id: String(result['_id']),
                 ...group,
                 members: [],
             });
@@ -105,9 +106,9 @@ export const handleCreateGroup = async (
             members: [],
         };
 
-        const result = await items.insert(COLLECTION_NAME, dataToInsert);
+        const result = await saveWholesaleGroup(dataToInsert);
         const createdGroup: AccessGroup = {
-            id: result._id,
+            id: String(result['_id']),
             ...dataToInsert,
         };
         setGroups(prev => [...prev, createdGroup]);
@@ -118,9 +119,9 @@ export const handleCreateGroup = async (
             type: 'success',
             timeout: 'normal'
         });
-    } catch {
+    } catch (error) {
         dashboard.showToast({
-            message: 'Failed to create group',
+            message: error instanceof Error ? error.message : 'Failed to create group',
             type: 'error',
             timeout: 'normal'
         });
@@ -162,7 +163,6 @@ export const handleEditGroup = async (
 
         setLoadingActions(prev => ({ ...prev, [`edit-${groupId}`]: true }));
         const dataToUpdate = {
-            _id: groupId,
             name: editGroup.name,
             maxProducts: editGroup.maxProducts,
             minProducts: editGroup.minProducts,
@@ -170,7 +170,7 @@ export const handleEditGroup = async (
             maxOrder: editGroup.maxOrder,
             members: editGroup.members,
         };
-        await items.update(COLLECTION_NAME, dataToUpdate);
+        await saveWholesaleGroup({ ...dataToUpdate, members: dataToUpdate.members.map(({ id, name, email }) => ({ id, name, email })) }, groupId);
         setGroups(prev => prev.map(group => group.id === groupId ? { ...editGroup } : group));
         setShowEditForm(false);
         setEditGroup(null);
@@ -179,9 +179,9 @@ export const handleEditGroup = async (
             type: 'success',
             timeout: 'normal'
         });
-    } catch {
+    } catch (error) {
         dashboard.showToast({
-            message: 'Failed to update group',
+            message: error instanceof Error ? error.message : 'Failed to update group',
             type: 'error',
             timeout: 'normal'
         });
@@ -232,7 +232,7 @@ export const handleDeleteGroup = async (
 ) => {
     try {
         setLoadingActions(prev => ({ ...prev, [`delete-${groupId}`]: true }));
-        await items.remove(COLLECTION_NAME, groupId);
+        await deleteWholesaleGroup(groupId);
         setGroups(prev => prev.filter(group => group.id !== groupId));
         setActiveDropdown(null);
         dashboard.showToast({
@@ -240,9 +240,9 @@ export const handleDeleteGroup = async (
             type: 'success',
             timeout: 'normal'
         });
-    } catch {
+    } catch (error) {
         dashboard.showToast({
-            message: 'Failed to delete group',
+            message: error instanceof Error ? error.message : 'Failed to delete group',
             type: 'error',
             timeout: 'normal'
         });

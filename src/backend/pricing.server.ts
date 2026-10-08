@@ -24,12 +24,38 @@ import {
   type ProductWholesalePriceResponse,
 } from './types';
 import { appPlans } from '@wix/app-management';
+import { authorizeDashboard, WHOLESALE_APP_ID } from './wholesale/context';
+import {
+  getCustomerFieldKey,
+  isContactWholesaleApproved,
+  isMemberWholesaleApproved,
+} from './wholesale/approval.server';
 
 export const dev_mode = true;
 
 const UPDATED_RULES_COLLECTION = '@wd-strategies/wholesale-appllication/UpdatedRules';
 
 const MEMBER_BATCH_SIZE = 100;
+
+class PartialRuleMutationError extends Error {
+  readonly partial = true;
+  constructor(message: string, readonly data: Record<string, unknown>) {
+    super(message);
+  }
+}
+
+async function rollbackCreatedRules(ruleIds: string[]): Promise<string[]> {
+  const incomplete: string[] = [];
+  for (const ruleId of ruleIds) {
+    try {
+      await auth.elevate(discountRules.deleteDiscountRule)(ruleId);
+      await mirrorRuleDelete(ruleId);
+    } catch {
+      incomplete.push(ruleId);
+    }
+  }
+  return incomplete;
+}
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
   const chunks: T[][] = [];
@@ -42,26 +68,44 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 // --- UpdatedRules mirror helpers ---
 
 async function mirrorRuleSave(rule: any): Promise<void> {
-  const ruleId = rule?._id;
-  if (!ruleId) return;
-  try {
-    await items.save(UPDATED_RULES_COLLECTION, { _id: ruleId, ...rule });
-  } catch (err) {
-  }
+  if (!rule?._id) throw new Error('The created rule has no ID.');
+  await auth.elevate(items.save)(UPDATED_RULES_COLLECTION, rule);
 }
 
 async function mirrorRuleReplace(oldRuleId: string, newRule: any): Promise<void> {
-  try {
-    await items.remove(UPDATED_RULES_COLLECTION, oldRuleId);
-  } catch (_) {}
   await mirrorRuleSave(newRule);
+  await mirrorRuleDelete(oldRuleId);
 }
 
 async function mirrorRuleDelete(ruleId: string): Promise<void> {
-  try {
-    await items.remove(UPDATED_RULES_COLLECTION, ruleId);
-  } catch (err) {
-  }
+  const result = await auth.elevate(items.query)(UPDATED_RULES_COLLECTION).eq('_id', ruleId).limit(1).find();
+  if (result.items.length) await auth.elevate(items.remove)(UPDATED_RULES_COLLECTION, ruleId);
+}
+
+function ruleMetadata(input: { description?: string; accessGroups?: string[] }, previous: any = {}) {
+  const legacyGroups = String(previous.offer || previous.description || '').match(/ \|\| Groups: (.*)$/)?.[1]?.split(',').map(id => id.trim()).filter(Boolean) || [];
+  const accessGroups = input.accessGroups ?? (previous.accessGroups?.length ? previous.accessGroups : legacyGroups);
+  const description = input.description ?? previous.description ?? (previous.offer || '').split(' || Groups: ')[0];
+  return { accessGroups, description, ruleFamilyId: previous.ruleFamilyId, offer: description + (accessGroups.length ? ` || Groups: ${accessGroups.join(',')}` : '') };
+}
+
+async function getMirroredRules(): Promise<any[]> {
+  let result = await auth.elevate(items.query)(UPDATED_RULES_COLLECTION).limit(100).find();
+  const rules = [...result.items];
+  while (result.hasNext()) { result = await result.next(); rules.push(...result.items); }
+  return rules;
+}
+
+function mergeRuleFamily(rules: any[]): any {
+  const first = rules[0];
+  if (rules.length < 2) return first;
+  const memberIds = [...new Set(rules.flatMap(rule => extractMemberIdsFromDiscountTrigger(rule.trigger)))];
+  const replaceMembers = (trigger: any): any => {
+    if (trigger?.triggerType === 'AND') return { ...trigger, and: { triggers: trigger.and.triggers.map(replaceMembers) } };
+    if (trigger?.triggerType === 'CUSTOMER_ELIGIBILITY') return { ...trigger, customerEligibility: { eligibilityType: 'INDIVIDUAL_MEMBERS', individualMembersInfo: { memberIds } } };
+    return trigger;
+  };
+  return { ...first, trigger: replaceMembers(first.trigger), physicalRuleIds: rules.map(rule => rule._id) };
 }
 
 // -----------------------------------
@@ -639,78 +683,29 @@ function extractMemberIdFromCurrentMember(currentMember: unknown): string | unde
   );
 }
 
-async function getCustomerExtendedFieldKey(): Promise<string | null> {
-  try {
-    return await getCustomerFieldKey();
-  } catch {
-    return null;
-  }
-}
-
-/** True when contact extended field customer === "wholesale" (dashboard approval). */
-async function isContactWholesaleApproved(contactId: string): Promise<boolean> {
-  try {
-    const contact = await elevatedGetContact(contactId, {
-      fieldsets: ['EXTENDED'],
-    });
-    const customerFieldKey = await getCustomerExtendedFieldKey();
-    if (!customerFieldKey) {
-      return false;
-    }
-
-    const rawContact = contact as any;
-    const contactData = rawContact?.contact || rawContact;
-    const extendedFieldItems =
-      contactData?.info?.extendedFields?.items ||
-      contactData?.extendedFields?.items ||
-      rawContact?.extendedFields?.items ||
-      {};
-    const status = extendedFieldItems[customerFieldKey];
-    const approved = status === 'wholesale';
-
-    return approved;
-  } catch (error) {
-    return false;
-  }
-}
-
-/** True when the site member's linked contact is an approved wholesale customer. */
-async function isMemberWholesaleApproved(memberId: string): Promise<boolean> {
-  try {
-    const member = await elevatedGetMember(memberId, { fieldsets: ['FULL'] } as any);
-    const contactId =
-      (member as any)?.contactId ||
-      (member as any)?.member?.contactId ||
-      (member as any)?.contact?.contactId ||
-      (member as any)?.contact?._id;
-
-    if (!contactId) {
-      return false;
-    }
-
-    const approved = await isContactWholesaleApproved(String(contactId));
-    return approved;
-  } catch (error) {
-    return false;
-  }
-}
-
 async function resolveCurrentMemberId(memberIdOverride?: string): Promise<{
   memberId?: string;
   source: 'session' | 'override' | 'none';
 }> {
-  const currentMember = await members.getCurrentMember({ fieldsets: ['FULL'] } as any).catch(() => null);
-  const sessionMemberId = extractMemberIdFromCurrentMember(currentMember);
-
-  // Prefer session identity; only fall back to client override when session is missing.
-  if (sessionMemberId) {
-    return { memberId: sessionMemberId, source: 'session' };
-  }
-
   const normalizedOverride = typeof memberIdOverride === 'string' ? memberIdOverride.trim() : '';
   if (normalizedOverride) {
-    return { memberId: normalizedOverride, source: 'override' };
+    const token = await auth.getTokenInfo();
+    if (token.subjectType === 'APP') {
+      if (!token.active || !token.siteId || !token.instanceId || (token.subjectId !== WHOLESALE_APP_ID && token.clientId !== WHOLESALE_APP_ID)) {
+        throw new Error('A trusted app context is required to calculate a member price.');
+      }
+      return { memberId: normalizedOverride, source: 'override' };
+    }
+    if (token.subjectType === 'USER') {
+      authorizeDashboard(token);
+      return { memberId: normalizedOverride, source: 'override' };
+    }
+    // Site visitors/members can't choose whose price they get — ignore the override
+    // and fall through to the session member below.
   }
+  const currentMember = await members.getCurrentMember({ fieldsets: ['FULL'] }).catch(() => null);
+  const sessionMemberId = extractMemberIdFromCurrentMember(currentMember);
+  if (sessionMemberId) return { memberId: sessionMemberId, source: 'session' };
 
   return { memberId: undefined, source: 'none' };
 }
@@ -1318,6 +1313,7 @@ export const getWholesalePricesBySlugs = webMethod(
       const response = Object.fromEntries(responseEntries);
       return response;
     } catch (error) {
+      console.error(`[Wholesale] getWholesalePricesBySlugs failed | slugCount=${normalizedSlugs.length} | elapsedMs=${Date.now() - startedAt} | error=${serializeError(error)}`);
       return {};
     }
   }
@@ -1384,14 +1380,14 @@ export const getMemberDetails = webMethod(
     try {
       // Use the 'FULL' fieldset to retrieve all member data, including contact details
       const options = {
-        fieldsets: ['FULL']
+        fieldsets: ['FULL' as const]
       };
 
       const member = await elevatedGetMember(memberId, options);
 
       // Custom fields are located in member.contact.customFields
       // The key for the custom field is defined in the Contacts Extended Fields API
-      const customFieldValue = member.contact.customFields['customer']?.value;
+
 
       return member;
     } catch (error) {
@@ -1417,7 +1413,7 @@ export const createCustomField = webMethod(
 export const createMemberCustomField = webMethod(Permissions.Anyone, async () => {
   const field = {
     name: "customer",
-    fieldType: "TEXT"
+    fieldType: "TEXT" as const
   };
 
   try {
@@ -1492,29 +1488,6 @@ export const getExtendedFieldsForMember = webMethod(Permissions.Anyone, async (c
 
 const elevatedQueryContacts = auth.elevate(contacts.queryContacts);
 const elevatedCreateContact = auth.elevate(contacts.createContact);
-
-/**
- * Single source of truth for the "customer" extended field key, used by both the
- * approval write (updateContact) and every wholesale read. Not cached: when the
- * field is recreated Wix issues a new suffixed key (custom.customer-xxxx), and a
- * stale cached key made approved contacts invisible to wholesale queries.
- */
-async function getCustomerFieldKey(): Promise<string> {
-  const fieldsResult = await elevatedQueryExtendedFields()
-    .eq("namespace", "custom")
-    .find();
-
-  // Prefer the exact field createCustomField() makes; fall back to the key pattern.
-  const customerField =
-    fieldsResult.items.find(field => field.displayName === 'customer') ||
-    fieldsResult.items.find(field => field.key?.startsWith('custom.customer'));
-
-  if (!customerField || !customerField.key) {
-    throw new Error('Customer type field not found');
-  }
-
-  return customerField.key;
-}
 
 /**
  * Centralized helper to execute contact queries with consistent pagination,
@@ -1850,31 +1823,33 @@ export const getAllMembers = webMethod(
   Permissions.Anyone,
   async () => {
     const allMembers: any[] = [];
-    const pageSize = 1000;
-    let offset = 0;
+    const pageSize = 100;
 
-    try {
-      while (true) {
-        const options = {
-          fieldsets: ["FULL" as const],
-          paging: { limit: pageSize, offset },
-          sort: { order: 'DESC' }
-        };
-
-        const currentPage = await elevatedListMembers(options);
-
-        if (currentPage.members && currentPage.members.length > 0) {
-          allMembers.push(...currentPage.members);
-          offset += pageSize;
-        } else {
-          break;
-        }
-      }
-
-      return allMembers;
-    } catch (error) {
-      throw error;
+    // Wix doesn't document a page cap, so advance by what was actually returned.
+    while (true) {
+      const currentPage = await elevatedListMembers({
+        fieldsets: ["FULL"],
+        paging: { limit: pageSize, offset: allMembers.length },
+      });
+      const page = currentPage.members || [];
+      allMembers.push(...page);
+      const total = currentPage.metadata?.total;
+      if (page.length === 0 || (typeof total === 'number' && allMembers.length >= total)) break;
     }
+
+    return allMembers;
+  }
+);
+
+export const findMemberByContactId = webMethod(
+  Permissions.Admin,
+  async (contactId: string) => {
+    if (!contactId) return null;
+    const result: any = await elevatedQueryMembers(
+      { filter: { contactId: { $eq: contactId } }, paging: { limit: 1 } },
+      { fieldsets: ["FULL"] }
+    );
+    return result.members?.[0] || null;
   }
 );
 
@@ -1882,39 +1857,23 @@ export const getMembersByIds = webMethod(
   Permissions.Anyone,
   async (memberIds: string[], limit?: number, offset: number = 0) => {
     if (!memberIds || memberIds.length === 0) return { members: [], total: 0 };
-    try {
-      const options = { fieldsets: ["FULL" as const] };
-      const PAGE_SIZE = 50;
-      const allMembers: any[] = [];
-      let currentOffset = offset;
-
-      // If a specific limit was requested, do a single paged fetch
-      if (limit !== undefined) {
-        const result = await elevatedQueryMembers(
-          { filter: { "_id": { "$in": memberIds } }, paging: { limit, offset } },
-          options
-        );
-        return {
-          members: result.members || [],
-          total: (result as any).pagingMetadata?.total || memberIds.length
-        };
-      }
-
-      // No explicit limit — paginate until all members are fetched
-      while (true) {
-        const result = await elevatedQueryMembers(
-          { filter: { "_id": { "$in": memberIds } }, paging: { limit: PAGE_SIZE, offset: currentOffset } },
-          options
-        );
-        const page = result.members || [];
-        allMembers.push(...page);
-        if (page.length < PAGE_SIZE) break;
-        currentOffset += PAGE_SIZE;
-      }
-      return { members: allMembers, total: allMembers.length };
-    } catch (error) {
-      throw error;
+    const options = { fieldsets: ["FULL" as const] };
+    const uniqueIds = [...new Set(memberIds)];
+    // Paginate over the ID list itself, then query in chunks: the members filter
+    // parser rejects $in lists longer than MEMBER_BATCH_SIZE values.
+    const pageIds = limit !== undefined ? uniqueIds.slice(offset, offset + limit) : uniqueIds.slice(offset);
+    const allMembers: any[] = [];
+    for (const chunk of chunkArray(pageIds, MEMBER_BATCH_SIZE)) {
+      const result = await elevatedQueryMembers(
+        { filter: { "_id": { "$in": chunk } }, paging: { limit: chunk.length } },
+        options
+      );
+      allMembers.push(...(result.members || []));
     }
+    return {
+      members: allMembers,
+      total: limit !== undefined ? uniqueIds.length : allMembers.length
+    };
   }
 );
 
@@ -1936,7 +1895,7 @@ async function loadAllProductsV1() {
 
     allProducts = allProducts.concat(items);
     skip += limit;
-    hasMore = allProducts.length < totalCount;
+    hasMore = totalCount !== undefined ? allProducts.length < totalCount : items.length === limit;
   }
 
   return allProducts;
@@ -2099,13 +2058,15 @@ export const saveConfiguration = webMethod(Permissions.Anyone, async (configData
       throw new Error('Invalid configuration data');
     }
 
+    const current = await getConfiguration();
     const dataToSave = {
-      notificationSettings: configData.notificationSettings,
-      emailTemplates: configData.emailTemplates || undefined,
+      ...current,
+      notificationSettings: { ...DEFAULT_NOTIFICATION_SETTINGS, ...current?.notificationSettings, ...configData.notificationSettings },
+      emailTemplates: configData.emailTemplates ?? current?.emailTemplates,
       updatedDate: new Date(),
     };
 
-    return await items.save(CONFIGURATION_COLLECTION, dataToSave, {
+    return await auth.elevate(items.save)(CONFIGURATION_COLLECTION, dataToSave, {
       suppressHooks: false
     });
 
@@ -2119,7 +2080,8 @@ export const saveConfiguration = webMethod(Permissions.Anyone, async (configData
 
 export const getConfiguration = webMethod(Permissions.Anyone, async () => {
   try {
-    const results = await items.query(CONFIGURATION_COLLECTION)
+    const results = await auth.elevate(items.query)(CONFIGURATION_COLLECTION)
+      .isNotEmpty('notificationSettings')
       .limit(1)
       .descending('_updatedDate')
       .find();
@@ -2139,12 +2101,13 @@ export const resetConfigurationToDefaults = webMethod(Permissions.Anyone, async 
 
 
     const defaultConfig = {
+      ...await getConfiguration(),
       notificationSettings: DEFAULT_NOTIFICATION_SETTINGS,
       updatedDate: new Date(),
       updatedBy: 'system-reset'
     };
 
-    return await items.save(CONFIGURATION_COLLECTION, defaultConfig, {
+    return await auth.elevate(items.save)(CONFIGURATION_COLLECTION, defaultConfig, {
       suppressHooks: false
     });
 
@@ -2174,6 +2137,7 @@ export const updateNotificationSetting = webMethod(Permissions.Anyone, async (se
     let config = await getConfiguration();
 
     const updatedConfig: any = {
+      ...config,
       notificationSettings: config?.notificationSettings || { ...DEFAULT_NOTIFICATION_SETTINGS },
       updatedDate: new Date(),
       updatedBy: 'system'
@@ -2185,7 +2149,7 @@ export const updateNotificationSetting = webMethod(Permissions.Anyone, async (se
       updatedConfig._id = config._id;
     }
 
-    return await items.save(CONFIGURATION_COLLECTION, updatedConfig, {
+    return await auth.elevate(items.save)(CONFIGURATION_COLLECTION, updatedConfig, {
       suppressHooks: false
     });
 
@@ -2276,7 +2240,9 @@ async function handleDiscountMemberEligibility(ruleId: string, memberIds: string
 export const createUnifiedRule = webMethod(
   Permissions.Admin,
   async (ruleData: CreateUnifiedRuleInput): Promise<CreateRuleResponse> => {
+    const createdIds: string[] = [];
     try {
+      const metadata = { ...ruleMetadata(ruleData), ruleFamilyId: crypto.randomUUID() };
       const {
         name,
         type = 'global',
@@ -2353,7 +2319,7 @@ export const createUnifiedRule = webMethod(
         discountValue.targetType = 'SPECIFIC_ITEMS';
         discountValue.specificItemsInfo = {
           scopes: [{
-            id: `collections_${catalogAppId}`,
+            _id: `collections_${catalogAppId}`,
             type: 'CUSTOM_FILTER',
             customFilter: {
               appId: catalogAppId || "215238eb-22a5-4c36-9e7b-e7c08025e04e",
@@ -2365,7 +2331,7 @@ export const createUnifiedRule = webMethod(
         discountValue.targetType = 'SPECIFIC_ITEMS';
         discountValue.specificItemsInfo = {
           scopes: productIds!.map(productId => ({
-            id: `specific_${productId}`,
+            _id: `specific_${productId}`,
             type: 'CATALOG_ITEM',
             catalogItemFilter: {
               catalogAppId: catalogAppId!,
@@ -2427,7 +2393,7 @@ export const createUnifiedRule = webMethod(
       const triggerScopes: any[] = [];
       if (type === 'category' && categoryIds && categoryIds.length > 0) {
         triggerScopes.push({
-          id: `collections_${catalogAppId}`,
+          _id: `collections_${catalogAppId}`,
           type: 'CUSTOM_FILTER',
           customFilter: {
             appId: catalogAppId || "215238eb-22a5-4c36-9e7b-e7c08025e04e",
@@ -2436,14 +2402,14 @@ export const createUnifiedRule = webMethod(
         });
       } else if (type === 'product' && productIds) {
         triggerScopes.push(...productIds.map(id => ({
-          id: `specific_${id}`,
+          _id: `specific_${id}`,
           type: 'CATALOG_ITEM',
           catalogItemFilter: { catalogAppId, catalogItemIds: [id] }
         })));
       } else {
         // Global scope
         triggerScopes.push({
-          id: `all_${catalogAppId}`,
+          _id: `all_${catalogAppId}`,
           type: 'CATALOG_ITEM',
           catalogItemFilter: { catalogAppId, catalogItemIds: [] }
         });
@@ -2530,7 +2496,8 @@ export const createUnifiedRule = webMethod(
 
             const result = await elevatedCreateRule(batchRule);
             const createdRule = (result as any).discountRule || result;
-            await mirrorRuleSave(createdRule);
+            if (createdRule._id) createdIds.push(createdRule._id);
+            await mirrorRuleSave({ ...createdRule, ...metadata });
             if (!firstCreatedRule) firstCreatedRule = createdRule;
           }
           return { success: true, data: firstCreatedRule } as CreateRuleResponse;
@@ -2539,8 +2506,9 @@ export const createUnifiedRule = webMethod(
         const result = await elevatedCreateRule(discountRule);
 
         const createdRule = (result as any).discountRule || result;
+        if (createdRule._id) createdIds.push(createdRule._id);
 
-        await mirrorRuleSave(createdRule);
+        await mirrorRuleSave({ ...createdRule, ...metadata });
 
         return {
           success: true,
@@ -2550,6 +2518,11 @@ export const createUnifiedRule = webMethod(
         throw error;
       }
     } catch (error) {
+      const incomplete = await rollbackCreatedRules(createdIds);
+      if (incomplete.length) throw new PartialRuleMutationError(
+        `Failed to create rule; cleanup remains incomplete: ${(error as Error).message}`,
+        { createdRuleIds: incomplete }
+      );
       throw new Error(`Failed to create rule: ${(error as Error).message}`);
     }
   }
@@ -2563,150 +2536,17 @@ export const createUnifiedRule = webMethod(
 export const createBulkCsvRules = webMethod(
   Permissions.Admin,
   async (ruleData: CreateUnifiedRuleInput): Promise<{ success: boolean; createdCount: number }> => {
-    try {
-      const {
-        name,
-        catalogAppId,
-        memberIds,
-        triggerId,
-        triggerAppId,
-        minimumQuantity,
-        maximumQuantity,
-        minimumOrder,
-        maximumOrder,
-        isActive = true,
-        startDate,
-        endDate,
-        bulkCsvItems
-      } = ruleData;
-
-      const response = await getAppInstance();
-      if (!dev_mode && response?.instance?.isFree) {
-        throw new Error('Please upgrade your plan to use bulk creation.');
-      }
-
-      if (!bulkCsvItems || bulkCsvItems.length === 0) {
-        throw new Error('No items provided for bulk creation');
-      }
-
-      const elevatedCreateRule = auth.elevate(discountRules.createDiscountRule);
-      let createdCount = 0;
-
-      for (const item of bulkCsvItems) {
-
-        const discountValue: any = {
-          discountType: 'FIXED_PRICE',
-          fixedPrice: item.price.toString(),
-          targetType: 'SPECIFIC_ITEMS',
-          specificItemsInfo: {
-            scopes: [
-              {
-                _id: `bulk_${item.productId}`,
-                type: 'CATALOG_ITEM',
-                catalogItemFilter: {
-                  catalogAppId: catalogAppId || '215238eb-22a5-4c36-9e7b-e7c08025e04e',
-                  catalogItemIds: [item.productId]
-                }
-              }
-            ]
-          }
-        };
-
-        const discountRule: any = {
-          name: `${name} - ${item.sku}`,
-          active: isActive,
-          discounts: {
-            values: [discountValue]
-          }
-        };
-
-        if (startDate || endDate) {
-          discountRule.activeTimeInfo = {};
-          if (startDate) {
-            discountRule.activeTimeInfo.start = typeof startDate === 'string' ? new Date(startDate) : startDate;
-          }
-          if (endDate) {
-            discountRule.activeTimeInfo.end = typeof endDate === 'string' ? new Date(endDate) : endDate;
-          }
-        }
-
-        const triggerScopes = [{
-          _id: `bulk_${item.productId}`,
-          type: 'CATALOG_ITEM',
-          catalogItemFilter: {
-            catalogAppId: catalogAppId || '215238eb-22a5-4c36-9e7b-e7c08025e04e',
-            catalogItemIds: [item.productId]
-          }
-        }];
-
-        const triggers: any[] = [];
-
-        if (memberIds && memberIds.length > 0) {
-          triggers.push({
-            triggerType: 'CUSTOMER_ELIGIBILITY',
-            customerEligibility: {
-              eligibilityType: 'INDIVIDUAL_MEMBERS',
-              individualMembersInfo: { memberIds }
-            }
-          });
-        }
-
-        const minQty = minimumQuantity || (ruleData as any).minQuantity;
-        const maxQty = maximumQuantity || (ruleData as any).maxQuantity;
-        if (minQty || maxQty) {
-          triggers.push({
-            triggerType: 'ITEM_QUANTITY_RANGE',
-            itemQuantityRange: {
-              from: minQty || undefined,
-              to: maxQty || undefined,
-              scopes: triggerScopes
-            }
-          });
-        }
-
-        if (minimumOrder || maximumOrder) {
-          triggers.push({
-            triggerType: 'SUBTOTAL_RANGE',
-            subtotalRange: {
-              from: minimumOrder ? minimumOrder.toString() : undefined,
-              to: maximumOrder ? maximumOrder.toString() : undefined,
-              scopes: triggerScopes
-            }
-          });
-        }
-
-        if (triggers.length === 0 && triggerId && triggerAppId) {
-          discountRule.trigger = {
-            triggerType: 'CUSTOM',
-            customTrigger: { _id: triggerId, appId: triggerAppId }
-          };
-        } else if (triggers.length === 1) {
-          discountRule.trigger = triggers[0];
-        } else if (triggers.length > 1) {
-          discountRule.trigger = {
-            triggerType: 'AND',
-            and: { triggers }
-          };
-        } else {
-        }
-
-        try {
-          const result = await elevatedCreateRule(discountRule);
-          const bulkCreatedRule = (result as any).discountRule || result;
-          await mirrorRuleSave(bulkCreatedRule);
-          createdCount++;
-        } catch (itemError: any) {
-          throw itemError;
-        }
-      }
-
-      return { success: true, createdCount };
-    } catch (error) {
-      throw new Error(`Failed to create bulk rules: ${(error as Error).message}`);
+    if (!ruleData.bulkCsvItems?.length) throw new Error('No items provided for bulk creation');
+    let createdCount = 0;
+    for (const item of ruleData.bulkCsvItems) {
+      await createUnifiedRule({ ...ruleData, name: `${ruleData.name} - ${item.sku}`.slice(0, 50),
+        type: 'product', discountType: 'fixed_price', fixedPrice: String(item.price), productIds: [item.productId],
+        minimumQuantity: ruleData.minimumQuantity ?? item.quantity });
+      createdCount++;
     }
+    return { success: true, createdCount };
   }
 );
-
 export const processBulkCsvData = webMethod(
   Permissions.Admin,
   async (csvData: Array<{ sku: string, quantity: number, price: number }>) => {
@@ -2748,47 +2588,37 @@ export const processBulkCsvData = webMethod(
 export const queryAllRules = webMethod(
   Permissions.Anyone,
   async (filters: RuleFilters = {}) => {
-    try {
-      const res = await getAppInstance();
-
-
-      const { active } = filters;
-
-      let query = discountRules.queryDiscountRules().descending('_createdDate');
-
-      if (active !== undefined) {
-        query = query.eq('active', active);
-      }
-
-      const PAGE_SIZE = 100;
-      let allItems: any[] = [];
-      let pageCount = 0;
-
-      let result: any = await query.limit(PAGE_SIZE).find();
-      pageCount++;
-      allItems = allItems.concat(result.items);
-
-      while (result._nextCursor) {
-        result = await result._fetchNextPage();
-        pageCount++;
-        allItems = allItems.concat(result.items);
-      }
-      return { _items: allItems };
-
-    } catch (error) {
-      throw new Error(`Failed to query rules: ${(error as Error).message}`);
+    let query = auth.elevate(discountRules.queryDiscountRules)().descending('_createdDate');
+    if (filters.active !== undefined) query = query.eq('active', filters.active);
+    let result = await query.limit(100).find();
+    const rules = [...result.items];
+    while (result.hasNext()) { result = await result.next(); rules.push(...result.items); }
+    const mirrors = await getMirroredRules();
+    const families = new Map<string, any[]>();
+    for (const rule of rules) {
+      const enriched = { ...rule, ...ruleMetadata({}, mirrors.find(mirror => mirror._id === rule._id)) };
+      const key = enriched.ruleFamilyId || rule._id || crypto.randomUUID();
+      families.set(key, [...families.get(key) || [], enriched]);
     }
+    return { _items: [...families.values()].map(mergeRuleFamily) };
   }
 );
-
 
 export const updateUnifiedRule = webMethod(
   Permissions.Admin,
   async (ruleId: string, ruleData: UpdateRuleInput): Promise<UpdateRuleResponse> => {
+    const createdIds: string[] = [];
+    const removedOldIds: string[] = [];
+    let removingOld = false;
     try {
       // Fetch current rule only to get name/active fallbacks
       const elevatedGetDiscountRule = auth.elevate(discountRules.getDiscountRule);
-      const currentRule = await elevatedGetDiscountRule(ruleId);
+      const physicalRule = await elevatedGetDiscountRule(ruleId);
+      const mirror = (await getMirroredRules()).find(rule => rule._id === ruleId);
+      const metadata = { ...ruleMetadata(ruleData, mirror), ruleFamilyId: mirror?.ruleFamilyId || crypto.randomUUID() };
+      const logicalRule = mirror?.ruleFamilyId ? (await queryAllRules())._items.find(rule => rule.ruleFamilyId === mirror.ruleFamilyId) : null;
+      const currentRule = logicalRule || physicalRule;
+      const oldIds: string[] = logicalRule?.physicalRuleIds || [ruleId];
 
       // Build discount value
       const currentDiscount = currentRule.discounts?.values?.[0] || {};
@@ -2799,6 +2629,10 @@ export const updateUnifiedRule = webMethod(
       const finalDiscountType = ruleData.discountType || (currentDiscount.discountType === 'PERCENTAGE' ? 'percentage' : (currentDiscount.discountType === 'FIXED_PRICE' ? 'fixed_price' : 'fixed'));
       const finalDiscountValue = ruleData.discountValue !== undefined ? ruleData.discountValue : (currentDiscount.percentage || parseFloat(currentDiscount.fixedAmount || '0') || parseFloat(currentDiscount.fixedPrice || '0') || 0);
 
+      if (!Number.isFinite(finalDiscountValue) || finalDiscountValue <= 0 || (finalDiscountType === 'percentage' && (finalDiscountValue < 0.1 || finalDiscountValue > 100))) {
+        throw new Error('The discount value is outside the supported range.');
+      }
+      if (ruleData.name !== undefined && !ruleData.name.trim()) throw new Error('Rule name is required.');
       if (finalDiscountType === 'percentage') {
         discountValue.discountType = 'PERCENTAGE';
         discountValue.percentage = Math.max(0.1, finalDiscountValue);
@@ -2819,7 +2653,7 @@ export const updateUnifiedRule = webMethod(
 
       const currentTargetIds = isCurrentCategory
         ? (firstScope.customFilter?.params?.collectionIds || [])
-        : (firstScope?.catalogItemFilter?.catalogItemIds || []);
+        : (currentDiscount.specificItemsInfo?.scopes || []).flatMap((scope: any) => scope.catalogItemFilter?.catalogItemIds || []);
 
       const currentType = isCurrentCategory ? 'category' : (currentTargetIds.length > 0 ? 'product' : 'global');
 
@@ -2833,7 +2667,7 @@ export const updateUnifiedRule = webMethod(
       if (finalType === 'category' && finalCategoryIds.length > 0) {
         discountValue.specificItemsInfo = {
           scopes: [{
-            id: `collections_${catalogAppId}`,
+            _id: `collections_${catalogAppId}`,
             type: 'CUSTOM_FILTER',
             customFilter: {
               appId: "215238eb-22a5-4c36-9e7b-e7c08025e04e",
@@ -2844,7 +2678,7 @@ export const updateUnifiedRule = webMethod(
       } else if (finalType === 'product' && finalProductIds.length > 0) {
         discountValue.specificItemsInfo = {
           scopes: finalProductIds.map((id: string) => ({
-            id: `product_${id}`,
+            _id: `product_${id}`,
             type: 'CATALOG_ITEM',
             catalogItemFilter: {
               catalogAppId: "215238eb-22a5-4c36-9e7b-e7c08025e04e",
@@ -2855,7 +2689,7 @@ export const updateUnifiedRule = webMethod(
       } else {
         discountValue.specificItemsInfo = {
           scopes: [{
-            id: "global_all_products",
+            _id: "global_all_products",
             type: 'CATALOG_ITEM',
             catalogItemFilter: {
               catalogAppId: "215238eb-22a5-4c36-9e7b-e7c08025e04e",
@@ -2868,7 +2702,6 @@ export const updateUnifiedRule = webMethod(
       // Build new rule payload (same structure as createUnifiedRule)
       const newRule: any = {
         name: ruleData.name !== undefined ? ruleData.name : currentRule.name,
-        offer: ruleData.description !== undefined ? ruleData.description : currentRule.offer,
         active: ruleData.active !== undefined ? ruleData.active : currentRule.active,
         discounts: {
           values: [discountValue]
@@ -2896,7 +2729,7 @@ export const updateUnifiedRule = webMethod(
 
       if (finalType === 'category' && finalCategoryIds.length > 0) {
         triggerScopes.push({
-          id: `collections_${catalogAppId}`,
+          _id: `collections_${catalogAppId}`,
           type: 'CUSTOM_FILTER',
           customFilter: {
             appId: catalogAppId,
@@ -2905,32 +2738,42 @@ export const updateUnifiedRule = webMethod(
         });
       } else if (finalType === 'product' && finalProductIds.length > 0) {
         triggerScopes.push(...finalProductIds.map((id: string) => ({
-          id: `specific_${id}`,
+          _id: `specific_${id}`,
           type: 'CATALOG_ITEM',
           catalogItemFilter: { catalogAppId, catalogItemIds: [id] }
         })));
       } else {
         // Global scope
         triggerScopes.push({
-          id: `all_${catalogAppId}`,
+          _id: `all_${catalogAppId}`,
           type: 'CATALOG_ITEM',
           catalogItemFilter: { catalogAppId, catalogItemIds: [] }
         });
       }
 
       // Extract current trigger info if not provided
-      const currentTrigger = currentRule.trigger || {};
-      const currentIndividualMembers = currentTrigger.customerEligibility?.individualMembersInfo?.memberIds || [];
-      const currentMinQty = (currentTrigger.itemQuantityRange?.from || undefined) as number | undefined;
-      const currentMaxQty = (currentTrigger.itemQuantityRange?.to || undefined) as number | undefined;
-      const currentMinOrder = currentTrigger.subtotalRange?.from ? parseFloat(currentTrigger.subtotalRange.from) : undefined;
-      const currentMaxOrder = currentTrigger.subtotalRange?.to ? parseFloat(currentTrigger.subtotalRange.to) : undefined;
-
-      const finalMemberIds = ruleData.memberIds !== undefined ? ruleData.memberIds : currentIndividualMembers;
-      const finalMinQty = ruleData.minQuantity !== undefined ? ruleData.minQuantity : currentMinQty;
-      const finalMaxQty = ruleData.maxQuantity !== undefined ? ruleData.maxQuantity : currentMaxQty;
-      const finalMinOrder = ruleData.minimumOrder !== undefined ? ruleData.minimumOrder : currentMinOrder;
-      const finalMaxOrder = ruleData.maximumOrder !== undefined ? ruleData.maximumOrder : currentMaxOrder;
+      const currentTriggers: any[] = [];
+      const collectTriggers = (trigger: any) => {
+        if (trigger?.triggerType === 'AND') (trigger.and?.triggers || []).forEach(collectTriggers);
+        else if (trigger) currentTriggers.push(trigger);
+      };
+      collectTriggers(currentRule.trigger);
+      const memberTrigger = currentTriggers.find(trigger => trigger.triggerType === 'CUSTOMER_ELIGIBILITY');
+      const quantityTrigger = currentTriggers.find(trigger => trigger.triggerType === 'ITEM_QUANTITY_RANGE');
+      const subtotalTrigger = currentTriggers.find(trigger => trigger.triggerType === 'SUBTOTAL_RANGE');
+      const finalMemberIds = ruleData.memberIds ?? memberTrigger?.customerEligibility?.individualMembersInfo?.memberIds ?? [];
+      const finalMinQty = ruleData.minQuantity ?? quantityTrigger?.itemQuantityRange?.from;
+      const finalMaxQty = ruleData.maxQuantity ?? quantityTrigger?.itemQuantityRange?.to;
+      const finalMinOrder = ruleData.minimumOrder ?? (subtotalTrigger?.subtotalRange?.from ? Number(subtotalTrigger.subtotalRange.from) : undefined);
+      const finalMaxOrder = ruleData.maximumOrder ?? (subtotalTrigger?.subtotalRange?.to ? Number(subtotalTrigger.subtotalRange.to) : undefined);
+      if ((finalMinQty && finalMaxQty && finalMinQty > finalMaxQty) || (finalMinOrder && finalMaxOrder && finalMinOrder > finalMaxOrder)) {
+        throw new Error('Minimum thresholds cannot exceed maximum thresholds.');
+      }
+      if ((finalType === 'category' && !finalCategoryIds.length) || (finalType === 'product' && !finalProductIds.length)) {
+        throw new Error('A targeted rule requires at least one target ID.');
+      }
+      if (finalMemberIds.length === 0 && memberTrigger) newRule.active = false;
+      triggers.push(...currentTriggers.filter(trigger => !['CUSTOMER_ELIGIBILITY', 'ITEM_QUANTITY_RANGE', 'SUBTOTAL_RANGE'].includes(trigger.triggerType)));
 
       if (finalMemberIds && finalMemberIds.length > 0) {
         triggers.push({
@@ -2942,23 +2785,23 @@ export const updateUnifiedRule = webMethod(
         });
       }
 
-      if (ruleData.minQuantity || ruleData.maxQuantity) {
+      if (finalMinQty || finalMaxQty) {
         triggers.push({
           triggerType: 'ITEM_QUANTITY_RANGE',
           itemQuantityRange: {
-            from: ruleData.minQuantity || undefined,
-            to: ruleData.maxQuantity || undefined,
+            from: finalMinQty || undefined,
+            to: finalMaxQty || undefined,
             scopes: triggerScopes
           }
         });
       }
 
-      if (ruleData.minimumOrder || ruleData.maximumOrder) {
+      if (finalMinOrder || finalMaxOrder) {
         triggers.push({
           triggerType: 'SUBTOTAL_RANGE',
           subtotalRange: {
-            from: ruleData.minimumOrder ? ruleData.minimumOrder.toString() : undefined,
-            to: ruleData.maximumOrder ? ruleData.maximumOrder.toString() : undefined,
+            from: finalMinOrder ? finalMinOrder.toString() : undefined,
+            to: finalMaxOrder ? finalMaxOrder.toString() : undefined,
             scopes: triggerScopes
           }
         });
@@ -2970,10 +2813,9 @@ export const updateUnifiedRule = webMethod(
         newRule.trigger = { triggerType: 'AND', and: { triggers } };
       }
 
-      // Delete the old rule then recreate — avoids Wix PATCH field mask restrictions
+      // Create the replacement before removing the old rule; Wix does not allow patching these fields.
       // (discounts.values and trigger.triggerType are not patchable via updateDiscountRule)
       const elevatedDeleteRule = auth.elevate(discountRules.deleteDiscountRule);
-      await elevatedDeleteRule(ruleId);
 
       const elevatedCreateRule = auth.elevate(discountRules.createDiscountRule);
 
@@ -2999,12 +2841,19 @@ export const updateUnifiedRule = webMethod(
 
           const result = await elevatedCreateRule(batchRule);
           const createdRule = (result as any).discountRule || result;
+          if (createdRule._id) createdIds.push(createdRule._id);
           if (!firstCreatedRule) {
-            await mirrorRuleReplace(ruleId, createdRule);
+            await mirrorRuleSave({ ...createdRule, ...metadata });
             firstCreatedRule = createdRule;
           } else {
-            await mirrorRuleSave(createdRule);
+            await mirrorRuleSave({ ...createdRule, ...metadata });
           }
+        }
+        removingOld = true;
+        for (const oldId of oldIds) {
+          await elevatedDeleteRule(oldId);
+          removedOldIds.push(oldId);
+          await mirrorRuleDelete(oldId);
         }
         return { success: true, data: firstCreatedRule };
       }
@@ -3012,12 +2861,28 @@ export const updateUnifiedRule = webMethod(
       const result = await elevatedCreateRule(newRule);
 
       const createdRule = (result as any).discountRule || result;
+      if (createdRule._id) createdIds.push(createdRule._id);
 
-      await mirrorRuleReplace(ruleId, createdRule);
+      await mirrorRuleSave({ ...createdRule, ...metadata });
 
+      removingOld = true;
+      for (const oldId of oldIds) {
+        await elevatedDeleteRule(oldId);
+        removedOldIds.push(oldId);
+        await mirrorRuleDelete(oldId);
+      }
       return { success: true, data: createdRule };
 
     } catch (error) {
+      if (removingOld) throw new PartialRuleMutationError(
+        `The replacement was saved, but old rule cleanup is incomplete: ${(error as Error).message}`,
+        { createdRuleIds: createdIds, removedRuleIds: removedOldIds }
+      );
+      const incomplete = await rollbackCreatedRules(createdIds);
+      if (incomplete.length) throw new PartialRuleMutationError(
+        `Failed to update rule; replacement cleanup remains incomplete: ${(error as Error).message}`,
+        { createdRuleIds: incomplete }
+      );
       throw new Error(`Failed to update rule: ${(error as Error).message}`);
     }
   }
@@ -3027,13 +2892,23 @@ export const updateUnifiedRule = webMethod(
 export const deleteUnifiedRule = webMethod(
   Permissions.Admin,
   async (ruleId: string): Promise<DeleteRuleResponse> => {
+    const removedIds: string[] = [];
     try {
 
-      await discountRules.deleteDiscountRule(ruleId);
-      await mirrorRuleDelete(ruleId);
+      const result = await getUnifiedRule(ruleId);
+      if (!result.success) throw new Error(result.error);
+      for (const id of result.data.physicalRuleIds || [ruleId]) {
+        await auth.elevate(discountRules.deleteDiscountRule)(id);
+        removedIds.push(id);
+        await mirrorRuleDelete(id);
+      }
 
       return { success: true };
     } catch (error) {
+      if (removedIds.length) throw new PartialRuleMutationError(
+        `Some rule records were removed, but cleanup is incomplete: ${(error as Error).message}`,
+        { removedRuleIds: removedIds }
+      );
       throw new Error(`Failed to delete rule: ${(error as Error).message}`);
     }
   }
@@ -3045,9 +2920,11 @@ export const getUnifiedRule = webMethod(
     try {
 
       const elevatedGetDiscountRule = auth.elevate(discountRules.getDiscountRule);
-      const response = await elevatedGetDiscountRule("a0353110-7b6f-4906-a2c3-e6d4d654b63a");
+      const response = await elevatedGetDiscountRule(ruleId);
 
-      return { success: true, data: response };
+      const metadata = ruleMetadata({}, (await getMirroredRules()).find(rule => rule._id === ruleId));
+      const family = metadata.ruleFamilyId ? (await queryAllRules())._items.find(rule => rule.ruleFamilyId === metadata.ruleFamilyId) : null;
+      return { success: true, data: family ? { ...family, _id: ruleId } : { ...response, ...metadata } };
 
     } catch (error) {
       return { success: false, error: (error as Error).message };
@@ -3060,7 +2937,9 @@ export const getMembersFromDiscountRule = webMethod(
   async (ruleId: string) => {
     try {
       const elevatedGetDiscountRule = auth.elevate(discountRules.getDiscountRule);
-      const rule = await elevatedGetDiscountRule(ruleId);
+      const response = await getUnifiedRule(ruleId);
+      if (!response.success) throw new Error(response.error);
+      const rule = response.data;
 
       // Extract member IDs — check direct CUSTOMER_ELIGIBILITY or nested inside AND trigger
       let memberIds: string[] = [];
@@ -3123,7 +3002,7 @@ export const removeMembersFromDiscountRule = webMethod(
         };
       }
 
-      await discountRules.deleteDiscountRule(ruleId);
+      await auth.elevate(discountRules.deleteDiscountRule)(ruleId);
       const result = await discountRules.createDiscountRule(updateData);
 
       return {
@@ -3146,7 +3025,7 @@ function extractMemberIdsFromDiscountTrigger(trigger: any): string[] {
     .flatMap((item) => item?.customerEligibility?.individualMembersInfo?.memberIds || []);
 }
 
-async function removeMemberFromAccessGroupsInternal(memberId: string): Promise<number> {
+async function removeMemberFromAccessGroupsInternal(memberIds: string[]): Promise<number> {
   const elevatedUpdateItem = auth.elevate(items.update);
   let result: any = await elevatedQueryItems(ACCESS_GROUPS_COLLECTION).limit(100).find();
   const allGroups: any[] = [...(result.items || [])];
@@ -3159,13 +3038,9 @@ async function removeMemberFromAccessGroupsInternal(memberId: string): Promise<n
   let updatedGroups = 0;
   for (const group of allGroups) {
     const members: any[] = Array.isArray(group.members) ? group.members : [];
-    const storedMemberIds = members.map((member: any) =>
-      typeof member === 'string' ? member : member?.id || member?._id || member?.memberId || 'unknown',
-    );
-    const hasMember = storedMemberIds.includes(memberId);
     const nextMembers = members.filter((member) => {
       const id = typeof member === 'string' ? member : member?.id || member?._id || member?.memberId;
-      return id !== memberId;
+      return !memberIds.includes(id);
     });
 
     if (nextMembers.length === members.length) {
@@ -3184,101 +3059,43 @@ async function removeMemberFromAccessGroupsInternal(memberId: string): Promise<n
 }
 
 async function removeMemberFromDiscountRulesInternal(memberId: string): Promise<number> {
-  const elevatedDeleteRule = auth.elevate(discountRules.deleteDiscountRule);
-  const elevatedCreateRule = auth.elevate(discountRules.createDiscountRule);
-  const liveRulesResponse = await queryAllRules();
-  const liveRules = (liveRulesResponse as any)?._items || (liveRulesResponse as any)?.items || [];
+  const rules = (await queryAllRules())._items;
   let updatedRules = 0;
-
-  for (const currentRule of liveRules) {
-    const ruleId = currentRule?._id;
-    if (!ruleId) continue;
-
-    try {
-      const currentMemberIds = extractMemberIdsFromDiscountTrigger(currentRule.trigger);
-      const hasMember = currentMemberIds.includes(memberId);
-      if (!hasMember) continue;
-
-      const updatedMemberIds = currentMemberIds.filter((id) => id !== memberId);
-      if (updatedMemberIds.length === 0) {
-        await elevatedDeleteRule(ruleId);
-        await mirrorRuleDelete(ruleId);
-        updatedRules += 1;
-        continue;
-      }
-
-      const updateData: any = {
-        name: currentRule.name,
-        active: currentRule.active,
-        discounts: currentRule.discounts,
-      };
-
-      if (currentRule.activeTimeInfo) {
-        updateData.activeTimeInfo = currentRule.activeTimeInfo;
-      }
-
-      const trigger = currentRule.trigger as any;
-      if (trigger?.triggerType === 'AND') {
-        const remainingTriggers = (trigger.and?.triggers || []).map((t: any) => {
-          if (t.triggerType !== 'CUSTOMER_ELIGIBILITY') {
-            return t;
-          }
-          return {
-            ...t,
-            customerEligibility: {
-              ...t.customerEligibility,
-              eligibilityType: 'INDIVIDUAL_MEMBERS',
-              individualMembersInfo: { memberIds: updatedMemberIds },
-            },
-          };
-        });
-        updateData.trigger = {
-          triggerType: 'AND',
-          and: { triggers: remainingTriggers },
-        };
-      } else {
-        updateData.trigger = {
-          triggerType: 'CUSTOMER_ELIGIBILITY',
-          customerEligibility: {
-            eligibilityType: 'INDIVIDUAL_MEMBERS',
-            individualMembersInfo: { memberIds: updatedMemberIds },
-          },
-        };
-      }
-
-      await elevatedDeleteRule(ruleId);
-      const created = await elevatedCreateRule(updateData);
-      const createdRule = (created as any)?.discountRule || created;
-      await mirrorRuleReplace(ruleId, createdRule);
-      updatedRules += 1;
-    } catch (error) {
-      throw error;
-    }
+  for (const rule of rules) {
+    const currentIds = extractMemberIdsFromDiscountTrigger(rule.trigger);
+    if (!currentIds.includes(memberId)) continue;
+    const memberIds = currentIds.filter(id => id !== memberId);
+    await updateUnifiedRule(rule._id, { memberIds, ...(memberIds.length === 0 ? { active: false } : {}) });
+    updatedRules++;
   }
-
   return updatedRules;
 }
 
 /**
  * Strip a member from access groups and pricing rules after reject/revoke.
+ * MOQ and shipping rules target access groups, so leaving the groups removes them there too.
+ * contactId also clears group entries saved under the contact ID when no member was resolved.
  * Contact customer field should already be cleared by the caller.
  */
 export const revokeWholesaleAccess = webMethod(
   Permissions.Admin,
-  async (memberId: string) => {
+  async (memberId?: string, contactId?: string) => {
     const normalizedMemberId = typeof memberId === 'string' ? memberId.trim() : '';
-    if (!normalizedMemberId) {
+    const normalizedContactId = typeof contactId === 'string' ? contactId.trim() : '';
+    if (!normalizedMemberId && !normalizedContactId) {
       return {
         success: false,
-        error: 'memberId is required',
+        error: 'memberId or contactId is required',
         accessGroupsUpdated: 0,
         rulesUpdated: 0,
       };
     }
 
     try {
-      const accessGroupsUpdated = await removeMemberFromAccessGroupsInternal(normalizedMemberId);
-      const rulesUpdated = await removeMemberFromDiscountRulesInternal(normalizedMemberId);
+      const accessGroupsUpdated = await removeMemberFromAccessGroupsInternal(
+        [normalizedMemberId, normalizedContactId].filter(Boolean),
+      );
+      const rulesUpdated = normalizedMemberId ? await removeMemberFromDiscountRulesInternal(normalizedMemberId) : 0;
       return {
         success: true,
         memberId: normalizedMemberId,
@@ -3319,7 +3136,7 @@ export const appendMembersToDiscountRule = webMethod(
       if (currentRule.activeTimeInfo) {
         updateData.activeTimeInfo = currentRule.activeTimeInfo;
       }
-      await discountRules.deleteDiscountRule(ruleId);
+      await auth.elevate(discountRules.deleteDiscountRule)(ruleId);
 
       if (allMemberIds.length === 0) {
         const result = await discountRules.createDiscountRule(updateData);
@@ -3779,38 +3596,13 @@ function buildSkuMap(products: any[], catalogVersion: string): Map<string, strin
   return map;
 }
 
+export async function getProductIdsBySkuData(skus: string[]): Promise<Record<string, string>> {
+  const catalog = await resolveCatalogLogic();
+  if (Array.isArray(catalog)) throw new Error('The store catalog version is unavailable.');
+  const skuMap = buildSkuMap(catalog.products, catalog.catalogVersion);
+  return Object.fromEntries(skus.flatMap(sku => skuMap.has(sku) ? [[sku, skuMap.get(sku)!]] : []));
+}
+
 export async function getProductIdBySkuData(sku: string) {
-  // Try V1 first — if the query succeeds (even with 0 results) the site is on V1,
-  // so return immediately and never call V3 APIs.
-  try {
-    const results = await items.query("Stores/Products")
-      .eq("sku", sku)
-      .limit(1)
-      .find();
-
-    return results.items.length > 0 ? results.items[0]._id : null;
-  } catch (_) {
-    // V1 collection unavailable — site is on Catalog V3
-  }
-
-  // V3 fallback — SKU is not a filterable field, so paginate and match in-memory.
-  try {
-    let result = await productsV3.queryProducts().limit(100).find();
-
-    while (true) {
-      for (const product of result.items) {
-        const variants: any[] = (product as any).variants ?? [];
-        if (variants.some((v: any) => v.sku === sku) || (product as any).sku === sku) {
-          return product._id;
-        }
-      }
-
-      if (!result.hasNext()) break;
-      result = await result.next();
-    }
-
-    return null;
-  } catch (error) {
-    throw error;
-  }
+  return (await getProductIdsBySkuData([sku]))[sku] || null;
 }

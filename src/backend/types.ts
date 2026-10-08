@@ -18,6 +18,8 @@ export interface CreateUnifiedRuleInput {
   minimumOrder?: number; // Minimum order value (MOV)
   maximumOrder?: number; // Maximum order value
   minimumQuantity?: number; // Minimum order quantity (MOQ)
+  minQuantity?: number;
+  maxQuantity?: number;
   maximumQuantity?: number; // Maximum order quantity
 
   // Target configuration
@@ -257,7 +259,7 @@ export interface UpdateRuleInput {
   targetId?: string;
   categoryIds?: string[];
   productIds?: string[];
-  discountType?: 'percentage' | 'fixed';
+  discountType?: 'percentage' | 'fixed' | 'fixed_amount' | 'fixed_price';
   discountValue?: number;
   startDate?: string;
   endDate?: string;

@@ -2,5 +2,6 @@
   "appId": "0415fd4c-b629-4e16-b417-707b9ff48a14",
   "projectId": "b-2-b-wholesale-pricing",
   "namespace": "@wd-strategies/wholesale-appllication",
-  "projectType": "App"
+  "projectType": "App",
+  "codeIdentifier": "wholesale_application"
 }

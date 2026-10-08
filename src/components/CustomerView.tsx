@@ -1,3 +1,4 @@
+import { updateWholesaleCustomer } from '../backend/wholesale.client';
 import React, { type FC, useState, useEffect, useRef } from 'react';
 import { items } from "@wix/data";
 import { dashboard } from '@wix/dashboard';
@@ -10,6 +11,7 @@ import { LoadingState } from './CustomerView/LoadingState';
 import { exportCustomersToCSV, memberExistsInAccessGroups, removeUserFromAllAccessGroups } from './CustomerView/Utils';
 import { type DashboardStats, formatRelativeDate } from './CustomerView/useDashboardStats';
 import { DashIcons } from './Dashboard/icons';
+import { SitePluginsCard } from './SitePluginsCard';
 import styles from './Dashboard/dashboard.module.css';
 
 import { type AccessGroup } from './AccessGroupType';
@@ -246,6 +248,8 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
         try {
             setLoadingActions(prev => ({ ...prev, 'update': true }));
 
+            await updateWholesaleCustomer(editingCustomer.id, editForm.status, editForm.status === 'approved' ? editForm.accessGroupIds.map(String) : []);
+            await fetchAccessGroups();
             const updatedCustomer: WholesaleApplication = {
                 ...editingCustomer,
                 accessGroupIds: editForm.accessGroupIds,
@@ -260,9 +264,9 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
                 message: "Customer updated successfully",
                 type: "success",
             });
-        } catch {
+        } catch (error) {
             dashboard.showToast({
-                message: "Failed to update customer",
+                message: error instanceof Error ? error.message : "Failed to update customer",
                 type: "error",
             });
         } finally {
@@ -288,27 +292,8 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
         try {
             setLoadingActions(prev => ({ ...prev, [`delete-${customerToDelete.id}`]: true }));
 
-            const contactResponse = await getContact(customerToDelete.id);
-            if (contactResponse.revision != null) {
-                await updateContact(customerToDelete.id, Number(contactResponse.revision), "");
-            }
-
-            const memberIdToRevoke = customerToDelete.memberId;
-            if (memberIdToRevoke) {
-                try {
-                    await revokeWholesaleAccess(memberIdToRevoke);
-                } catch {
-                    // Ignore revoke error
-                }
-
-                if (memberExistsInAccessGroups(memberIdToRevoke, accessGroups)) {
-                    try {
-                        setAccessGroups(await removeUserFromAllAccessGroups(memberIdToRevoke, accessGroups));
-                    } catch {
-                        // Access is already revoked; group cleanup failures are reported by the helper
-                    }
-                }
-            }
+            await updateWholesaleCustomer(customerToDelete.id, 'pending');
+            await fetchAccessGroups();
 
             setCustomers(prev => prev.filter(c => c.id !== customerToDelete.id));
             setTotalCustomers(prev => (prev === null ? prev : Math.max(0, prev - 1)));
@@ -320,9 +305,9 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
 
             setShowDeleteModal(false);
             setCustomerToDelete(null);
-        } catch {
+        } catch (error) {
             dashboard.showToast({
-                message: "Failed to delete customer",
+                message: error instanceof Error ? error.message : "Failed to delete customer",
                 type: "error",
             });
         } finally {
@@ -414,6 +399,8 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
                     icon={<DashIcons.Tag size={16} />}
                 />
             </div>
+
+            <SitePluginsCard />
 
             <div className={styles.body}>
                 <section className={`${styles.card} ${styles.tableCard}`} aria-label="Customers">
