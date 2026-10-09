@@ -46,6 +46,8 @@ export const PRICING_ROUTES = {
   getMembersFromDiscountRule: 'get-members-from-discount-rule',
   removeMembersFromDiscountRule: 'remove-members-from-discount-rule',
   revokeWholesaleAccess: 'revoke-wholesale-access',
+  repairWholesaleRuleGates: 'repair-wholesale-rule-gates',
+  mergeSplitRuleFamilies: 'merge-split-rule-families',
   appendMembersToDiscountRule: 'append-members-to-discount-rule',
   applyDiscountRuleToAccessGroup: 'apply-discount-rule-to-access-group',
   getAppPlanIds: 'get-app-plan-ids',

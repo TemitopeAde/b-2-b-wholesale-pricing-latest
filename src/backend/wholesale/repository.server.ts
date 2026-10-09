@@ -3,6 +3,7 @@ import { items } from "@wix/data";
 import * as pricing from "../pricing.server";
 import type { UpdateRuleInput } from "../types";
 import { customerEmail } from "./applications";
+import { isMemberWholesaleApproved } from "./approval.server";
 import {
   record,
   text,
@@ -47,17 +48,13 @@ export const workflowDependencies: WorkflowDependencies = {
   },
   async validateMembers(requested) {
     if (!requested.length) return;
-    const members = (await pricing.getAllMembers()).map(record);
-    const contacts = (await pricing.searchWholesaleContacts("")).map(record);
-    const rejected = requested.filter((requestedMember) => {
-      const member = members.find(
-        (value) => value["_id"] === requestedMember.id,
-      );
-      return (
-        !member ||
-        !contacts.some((contact) => contact["_id"] === member["contactId"])
-      );
-    });
+    // Check only the members being added (a few Wix calls each). Loading every site member and
+    // wholesale contact exceeded the Workers per-request subrequest limit on large sites.
+    const rejected: typeof requested = [];
+    for (const requestedMember of requested) {
+      if (!(await isMemberWholesaleApproved(requestedMember.id)))
+        rejected.push(requestedMember);
+    }
     if (rejected.length) {
       const names = rejected.map(
         (member) => member.name || member.email || member.id,
@@ -71,6 +68,16 @@ export const workflowDependencies: WorkflowDependencies = {
     return (await pricing.queryAllRules())._items.map(record);
   },
   async replaceRule(id, changes) {
+    // Group sync only changes members (and access groups when a group is deleted), so rewrite
+    // just the affected pieces of the rule instead of every piece.
+    const { memberIds, accessGroups, active: _active, ...rest } = changes as RecordData;
+    if (Array.isArray(memberIds) && Object.keys(rest).length === 0) {
+      return pricing.setRuleFamilyMembers(
+        id,
+        memberIds.map(String),
+        Array.isArray(accessGroups) ? accessGroups.map(String) : undefined,
+      );
+    }
     return pricing.updateUnifiedRule(id, changes as UpdateRuleInput);
   },
   async getContact(id) {

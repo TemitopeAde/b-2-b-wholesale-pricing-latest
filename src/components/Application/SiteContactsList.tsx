@@ -1,6 +1,7 @@
 import React, { type FC, useState, useEffect, useRef } from 'react';
 import { dashboard } from '@wix/dashboard';
 import { getAllContacts, getConfiguration, getContact, updateContact, sendWholesaleApprovalEmail, sendWholesaleRejectionEmail } from '../../backend/pricing.client';
+import { updateWholesaleCustomer } from '../../backend/wholesale.client';
 import { ConfirmationModal } from './ConfirmationModal';
 import {
   Badge,
@@ -21,6 +22,7 @@ import {
   VisuallyHidden,
 } from '../ui';
 import { DashIcons } from '../Dashboard/icons';
+import { useDebouncedCallback } from '../../utils/useDebouncedCallback';
 
 interface Contact {
   _id: string;
@@ -58,43 +60,46 @@ export const SiteContactsList: FC = () => {
   const [selectedContactId, setSelectedContactId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Only the newest request may update the list, so a slow earlier search can't overwrite it.
+  const latestFetchRef = useRef(0);
 
   useEffect(() => {
     fetchContacts(currentPage, searchQuery);
   }, [currentPage]);
 
   const fetchContacts = async (page: number, search: string = '') => {
+    const requestId = ++latestFetchRef.current;
     try {
       setIsLoading(true);
       const result = await getAllContacts(page, PAGE_SIZE, search);
+      if (requestId !== latestFetchRef.current) return;
       setContacts(result.contacts || []);
       setTotalContacts(result.totalCount || 0);
     } catch {
-      setContacts([]);
+      if (requestId === latestFetchRef.current) setContacts([]);
     } finally {
-      setIsLoading(false);
+      if (requestId === latestFetchRef.current) setIsLoading(false);
     }
   };
+
+  // A new search starts from page 1. Off page 1, changing the page lets the page effect fetch,
+  // so the search isn't requested twice.
+  const runSearch = (value: string) => {
+    if (currentPage !== 1) setCurrentPage(1);
+    else fetchContacts(1, value);
+  };
+  const debouncedSearch = useDebouncedCallback(runSearch, 400);
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setSearchQuery(value);
-
-    if (searchDebounceRef.current) {
-      clearTimeout(searchDebounceRef.current);
-    }
-
-    searchDebounceRef.current = setTimeout(() => {
-      setCurrentPage(1);
-      fetchContacts(1, value);
-    }, 400);
+    debouncedSearch(value);
   };
 
   const handleSearchClear = () => {
+    debouncedSearch.cancel();
     setSearchQuery('');
-    setCurrentPage(1);
-    fetchContacts(1, '');
+    runSearch('');
   };
 
   const getCustomerStatus = (contact: Contact): string => {
@@ -174,15 +179,11 @@ export const SiteContactsList: FC = () => {
     if (!selectedContactId) return;
     try {
       setLoadingActions(prev => ({ ...prev, [`${selectedContactId}-revoke`]: true }));
-      const contactResponse = await getContact(selectedContactId);
       const contact = contacts.find(c => c._id === selectedContactId);
       const email = contact?.primaryInfo?.email;
 
-      if (contactResponse.revision === undefined || contactResponse.revision === null) {
-        throw new Error('The contact has no revision and cannot be revoked. Refresh and try again.');
-      }
-
-      await updateContact(selectedContactId, Number(contactResponse.revision), "");
+      // Clears the wholesale flag and removes the member from access groups and pricing rules.
+      await updateWholesaleCustomer(selectedContactId, 'pending');
       const updatedContactResponse = await getContact(selectedContactId);
       setContacts(prev => prev.map(c => c._id === selectedContactId ? { ...c, ...updatedContactResponse } : c));
 
@@ -247,11 +248,10 @@ export const SiteContactsList: FC = () => {
       const emailConfig = await getConfiguration();
       const shouldSendEmail = emailConfig?.notificationSettings?.rejectionEmails ?? true;
       const failures: string[] = [];
-      await Promise.all([...selectedIds].map(async (id) => {
+      // Sequential: each revoke rewrites the shared pricing rules, so parallel revokes would overwrite each other.
+      for (const id of selectedIds) {
         try {
-          const contactResponse = await getContact(id);
-          if (contactResponse.revision == null) throw new Error('missing contact revision');
-          await updateContact(id, Number(contactResponse.revision), '');
+          await updateWholesaleCustomer(id, 'pending');
           const updated = await getContact(id);
           setContacts(prev => prev.map(c => c._id === id ? { ...c, ...updated } : c));
           const email = contacts.find(c => c._id === id)?.primaryInfo?.email;
@@ -259,7 +259,7 @@ export const SiteContactsList: FC = () => {
         } catch (error) {
           failures.push(id);
         }
-      }));
+      }
       if (failures.length > 0) {
         dashboard.showToast({ message: `${failures.length} contact revoke(s) failed.`, type: 'error', timeout: 'normal' });
       } else {

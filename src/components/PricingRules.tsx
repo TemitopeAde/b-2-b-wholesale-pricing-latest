@@ -22,8 +22,9 @@ import {
   getUnifiedRule,
   getAppPlanIds,
   createBulkCsvRules,
-  getMembersByIds,
   getProductById,
+  repairWholesaleRuleGates,
+  mergeSplitRuleFamilies,
 } from "../backend/pricing.client";
 import { dev_mode } from '../dashboard/dev_mode';
 import { useAppInstance } from '../utils/appInstance';
@@ -42,7 +43,6 @@ import {
   CellStack,
   Checkbox,
   type Column,
-  ConfirmDialog,
   DataTable,
   Dropdown,
   EmptyState,
@@ -200,27 +200,6 @@ export const PricingRulesView: FC = () => {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  const [viewMembersModal, setViewMembersModal] = useState<{
-    isOpen: boolean;
-    rule: PricingRule | null;
-    members: any[];
-    allMemberIds: string[];
-    isLoading: boolean;
-    currentPage: number;
-    totalCount: number;
-    pageSize: number;
-  }>({
-    isOpen: false,
-    rule: null,
-    members: [],
-    allMemberIds: [],
-    isLoading: false,
-    currentPage: 1,
-    totalCount: 0,
-    pageSize: 20,
-  });
-  const [memberToRemove, setMemberToRemove] = useState<{ id: string; name: string } | null>(null);
-  const [removingMember, setRemovingMember] = useState(false);
 
   useEffect(() => {
     const initializeData = async () => {
@@ -228,6 +207,26 @@ export const PricingRulesView: FC = () => {
       setError(null);
       fetchCatalogData(setCategories, setProducts, setLoadingCatalog);
       fetchAccessGroups(setAccessGroups, setLoadingAccessGroups);
+      // Group pieces of rules the dashboard used to split one-by-one, so they list and edit as one rule.
+      try {
+        await mergeSplitRuleFamilies();
+      } catch (mergeError) {
+        console.warn('[mergeSplitRuleFamilies] failed', mergeError);
+      }
+      // Re-save older rules without the wholesale gate before listing them, since repair replaces rule IDs.
+      try {
+        const repair = await repairWholesaleRuleGates();
+        if (repair && !repair.success) {
+          console.warn('[repairWholesaleRuleGates] rules that could not be updated', repair.failed);
+          const [first] = repair.failed;
+          throw new Error(`${repair.failed.length} rule(s) could not be updated. First: "${first?.name}": ${first?.error}`);
+        }
+      } catch (repairError) {
+        dashboard.showToast({
+          message: `Some pricing rules may still apply to retail customers: ${(repairError as Error).message}`,
+          type: 'error'
+        });
+      }
       try {
         await fetchEnhancedRules();
       } catch (error: any) {
@@ -380,14 +379,6 @@ export const PricingRulesView: FC = () => {
     }
   };
 
-  const chunkArray = (arr: any[], size: number) => {
-    const chunks = [];
-    for (let i = 0; i < arr.length; i += size) {
-      chunks.push(arr.slice(i, i + size));
-    }
-    return chunks;
-  };
-
   const handleEnhancedCreateRule = async (formRule: any) => {
     setLoadingActions(prev => ({ ...prev, create: true }));
     try {
@@ -421,30 +412,16 @@ export const PricingRulesView: FC = () => {
           categoryIds: formRule.type === 'category' ? (formRule.categoryIds?.length > 0 ? formRule.categoryIds : (formRule.targetId ? [formRule.targetId] : [])) : undefined,
         };
 
-        const MEMBER_BATCH_SIZE = 100;
-        if (allMemberIds.length > MEMBER_BATCH_SIZE && formRule.type !== 'bulk_csv') {
-          const chunks = chunkArray(allMemberIds, MEMBER_BATCH_SIZE);
-          
-          for (let i = 0; i < chunks.length; i++) {
-            dashboard.showToast({ 
-              message: `Creating rule batch ${i + 1} of ${chunks.length}...`, 
-              type: 'info' 
-            });
-            await createUnifiedRule({
-              ...ruleBaseData,
-              memberIds: chunks[i]
-            });
-          }
+        // One call with every member: the server splits them into Wix rules of 100 that share a
+        // ruleFamilyId, so they list, edit and delete as one rule. Splitting here gave each piece its own family.
+        const ruleData = {
+          ...ruleBaseData,
+          memberIds: allMemberIds.length > 0 ? allMemberIds : formRule.memberIds,
+        };
+        if (formRule.type === 'bulk_csv') {
+          await createBulkCsvRules(ruleData);
         } else {
-          const ruleData = {
-            ...ruleBaseData,
-            memberIds: allMemberIds.length > 0 ? allMemberIds : formRule.memberIds,
-          };
-          if (formRule.type === 'bulk_csv') {
-            await createBulkCsvRules(ruleData);
-          } else {
-            await createUnifiedRule(ruleData);
-          }
+          await createUnifiedRule(ruleData);
         }
       }
       setShowCreateForm(false);
@@ -570,67 +547,6 @@ export const PricingRulesView: FC = () => {
     }
   };
 
-  const handleViewMembers = async (rule: PricingRule, page: number = 1) => {
-    setViewMembersModal(prev => ({ ...prev, isOpen: true, rule, currentPage: page, isLoading: true }));
-    try {
-      // Pricing rules carry their real eligibility list; fall back to group members otherwise
-      const allIds = rule.ruleCategory === 'pricing' && rule.memberIds?.length
-        ? Array.from(new Set(rule.memberIds))
-        : Array.from(new Set([...(rule.memberIds || []), ...(rule.accessGroups || []).flatMap(gid => accessGroups.find(g => g.id === gid)?.members.map(m => m.id) || [])]));
-      if (allIds.length === 0) {
-        setViewMembersModal(prev => ({ ...prev, isLoading: false, members: [], totalCount: 0, allMemberIds: [] }));
-        return;
-      }
-      const pageSize = viewMembersModal.pageSize;
-      const { members, total } = await getMembersByIds(allIds, pageSize, (page - 1) * pageSize);
-      setViewMembersModal(prev => ({ ...prev, members, totalCount: total, isLoading: false, allMemberIds: allIds, currentPage: page }));
-    } catch (e) {
-      setViewMembersModal(prev => ({ ...prev, isLoading: false }));
-    }
-  };
-
-  const handleViewMembersPage = async (page: number) => {
-    const { allMemberIds, pageSize, rule } = viewMembersModal;
-    if (!rule || allMemberIds.length === 0) return;
-    setViewMembersModal(prev => ({ ...prev, isLoading: true, currentPage: page }));
-    try {
-      const { members, total } = await getMembersByIds(allMemberIds, pageSize, (page - 1) * pageSize);
-      setViewMembersModal(prev => ({ ...prev, members, totalCount: total, isLoading: false }));
-    } catch (e) {
-      setViewMembersModal(prev => ({ ...prev, isLoading: false }));
-    }
-  };
-
-  const handleRemoveMemberFromRule = async () => {
-    const { rule, allMemberIds, currentPage, pageSize } = viewMembersModal;
-    if (!rule || !memberToRemove) return;
-    setRemovingMember(true);
-    try {
-      const memberIds = allMemberIds.filter(id => id !== memberToRemove.id);
-      // Wix recreates the discount rule on update, so the rule id changes
-      const result: any = await updateUnifiedRule(rule.id, { memberIds, ...(memberIds.length === 0 ? { active: false } : {}) });
-      const updatedRule = { ...rule, id: result?.data?._id || rule.id, memberIds, isActive: memberIds.length === 0 ? false : rule.isActive };
-      const lastPage = Math.max(1, Math.ceil(memberIds.length / pageSize));
-      const page = Math.min(currentPage, lastPage);
-      const { members, total } = memberIds.length
-        ? await getMembersByIds(memberIds, pageSize, (page - 1) * pageSize)
-        : { members: [], total: 0 };
-      setViewMembersModal(prev => ({ ...prev, rule: updatedRule, allMemberIds: memberIds, members, totalCount: total, currentPage: page }));
-      dashboard.showToast({
-        message: memberIds.length === 0
-          ? `${memberToRemove.name} removed. The rule has no members left, so it was deactivated.`
-          : `${memberToRemove.name} removed from this rule`,
-        type: 'success',
-      });
-      setMemberToRemove(null);
-      fetchEnhancedRules();
-    } catch (e: any) {
-      dashboard.showToast({ message: `Error: ${e.message}`, type: 'error' });
-    } finally {
-      setRemovingMember(false);
-    }
-  };
-
   const openDeleteConfirmation = (ruleId: string, ruleName: string) => setDeleteConfirmation({ isOpen: true, ruleId, ruleName });
   const confirmDelete = () => deleteConfirmation.ruleId && handleEnhancedDeleteRule(deleteConfirmation.ruleId);
   const toggleRuleSelection = (id: string) => setSelectedRuleIds(prev => {
@@ -722,11 +638,6 @@ export const PricingRulesView: FC = () => {
       render: (row) => {
         const productIds = ruleProductIds(row);
         const secondary = [
-          {
-            text: `View members${row.accessGroups && row.accessGroups.length > 0 ? ` (${row.accessGroups.length} group${row.accessGroups.length === 1 ? '' : 's'})` : ''}`,
-            icon: <DashIcons.Users size={16} />,
-            onClick: () => handleViewMembers(row),
-          },
           ...((row.type === 'product' || productIds.length > 0) ? [{
             text: productIds.length > 1 ? 'View products' : 'View product',
             icon: <DashIcons.Box size={16} />,
@@ -950,79 +861,6 @@ export const PricingRulesView: FC = () => {
           onClose={() => setProductDetail({ isOpen: false, productId: '', productIds: [], productName: undefined })}
         />
       ) : null}
-
-      <Modal
-        isOpen={viewMembersModal.isOpen}
-        onClose={() => setViewMembersModal(prev => ({ ...prev, isOpen: false }))}
-        size="medium"
-        title="Who gets this rule"
-        subtitle={viewMembersModal.rule?.name}
-        footer={<Button variant="secondary" onClick={() => setViewMembersModal(prev => ({ ...prev, isOpen: false }))}>Close</Button>}
-      >
-        {viewMembersModal.isLoading ? (
-          <LoadingBlock message="Loading members…" />
-        ) : viewMembersModal.members.length === 0 ? (
-          <EmptyState icon={<DashIcons.Users size={22} />} title="No members" subtitle="This rule isn't assigned to any customers yet." />
-        ) : (
-          <Box direction="vertical" gap="12px">
-            <Card>
-              <DataTable
-                data={viewMembersModal.members}
-                rowKey={(m: any) => m._id}
-                columns={[
-                  {
-                    title: 'Name',
-                    render: (m: any) => `${m.contact?.firstName || ''} ${m.contact?.lastName || ''}`.trim() || m.loginEmail || 'Unknown',
-                  },
-                  { title: 'Email', render: (m: any) => m.loginEmail || '—' },
-                  ...(viewMembersModal.rule?.ruleCategory === 'pricing' ? [{
-                    title: <VisuallyHidden>Actions</VisuallyHidden>,
-                    align: 'right' as const,
-                    width: '110px',
-                    render: (m: any) => (
-                      <Button
-                        size="small"
-                        variant="secondary"
-                        prefixIcon={<DashIcons.Trash size={14} />}
-                        onClick={() => setMemberToRemove({
-                          id: m._id,
-                          name: `${m.contact?.firstName || ''} ${m.contact?.lastName || ''}`.trim() || m.loginEmail || 'This member',
-                        })}
-                      >
-                        Remove
-                      </Button>
-                    ),
-                  }] : []),
-                ]}
-              />
-            </Card>
-            {viewMembersModal.totalCount > viewMembersModal.pageSize && (
-              <Box align="space-between" verticalAlign="middle">
-                <span style={{ fontSize: 13, color: 'var(--wh-muted)' }}>
-                  {(viewMembersModal.currentPage - 1) * viewMembersModal.pageSize + 1}–{Math.min(viewMembersModal.currentPage * viewMembersModal.pageSize, viewMembersModal.totalCount)} of {viewMembersModal.totalCount}
-                </span>
-                <Pagination
-                  currentPage={viewMembersModal.currentPage}
-                  totalPages={Math.ceil(viewMembersModal.totalCount / viewMembersModal.pageSize)}
-                  onChange={({ page }) => handleViewMembersPage(page)}
-                />
-              </Box>
-            )}
-          </Box>
-        )}
-      </Modal>
-
-      <ConfirmDialog
-        isOpen={!!memberToRemove}
-        title="Remove member from rule?"
-        message={`${memberToRemove?.name} will no longer get "${viewMembersModal.rule?.name}".`}
-        subMessage={viewMembersModal.allMemberIds.length === 1 ? 'This is the last member on the rule, so the rule will be deactivated.' : undefined}
-        confirmText="Remove"
-        tone="danger"
-        isLoading={removingMember}
-        onConfirm={handleRemoveMemberFromRule}
-        onCancel={() => !removingMember && setMemberToRemove(null)}
-      />
 
       {showScrollTop && <ScrollTopButton onClick={scrollToTop} />}
     </Page>

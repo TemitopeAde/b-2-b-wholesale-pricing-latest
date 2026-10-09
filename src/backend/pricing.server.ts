@@ -421,6 +421,28 @@ function flattenTriggers(trigger: any): any[] {
   return [trigger];
 }
 
+// Must match the id the wholesale-pricing discount trigger service plugin lists.
+const WHOLESALE_TRIGGER_ID = 'wholesale-pricing';
+
+function isWholesaleGate(trigger: any): boolean {
+  return trigger?.triggerType === 'CUSTOM' && trigger.customTrigger?._id === WHOLESALE_TRIGGER_ID;
+}
+
+function hasWholesaleGate(trigger: any): boolean {
+  return flattenTriggers(trigger).some(isWholesaleGate);
+}
+
+/**
+ * Every rule this app writes must AND the wholesale custom trigger with its other conditions.
+ * Without it, Wix applies the discount to anyone who meets the qty/subtotal range (or to
+ * everyone when no trigger is set), so retail shoppers saw wholesale prices at checkout.
+ */
+function buildGatedTrigger(triggers: any[]): any {
+  const others = triggers.filter(trigger => trigger && !isWholesaleGate(trigger));
+  const gate = { triggerType: 'CUSTOM', customTrigger: { _id: WHOLESALE_TRIGGER_ID, appId: WHOLESALE_APP_ID } };
+  return others.length === 0 ? gate : { triggerType: 'AND', and: { triggers: [...others, gate] } };
+}
+
 function extractEligibleMemberIds(rule: UpdatedRuleRecord): string[] {
   return flattenTriggers(rule.trigger)
     .filter((trigger) => trigger?.triggerType === 'CUSTOMER_ELIGIBILITY')
@@ -1856,23 +1878,64 @@ export const findMemberByContactId = webMethod(
 export const getMembersByIds = webMethod(
   Permissions.Anyone,
   async (memberIds: string[], limit?: number, offset: number = 0) => {
-    if (!memberIds || memberIds.length === 0) return { members: [], total: 0 };
+    if (!memberIds || memberIds.length === 0) return { members: [], total: 0, failedCount: 0 };
     const options = { fieldsets: ["FULL" as const] };
     const uniqueIds = [...new Set(memberIds)];
     // Paginate over the ID list itself, then query in chunks: the members filter
     // parser rejects $in lists longer than MEMBER_BATCH_SIZE values.
     const pageIds = limit !== undefined ? uniqueIds.slice(offset, offset + limit) : uniqueIds.slice(offset);
     const allMembers: any[] = [];
-    for (const chunk of chunkArray(pageIds, MEMBER_BATCH_SIZE)) {
-      const result = await elevatedQueryMembers(
-        { filter: { "_id": { "$in": chunk } }, paging: { limit: chunk.length } },
-        options
-      );
+    const failedIds: string[] = [];
+    let diagnosed = 0;
+    const describe = (error: any) => {
+      const details = error?.details?.applicationError;
+      return `${error?.message || String(error)}${details?.code ? ` | code=${details.code}` : ''}${error?.details?.requestId ? ` | requestId=${error.details.requestId}` : ''}`;
+    };
+    const queryChunk = (chunk: string[]) => elevatedQueryMembers(
+      { filter: { "_id": { "$in": chunk } }, paging: { limit: chunk.length } },
+      options
+    );
+    const chunks = chunkArray(pageIds, MEMBER_BATCH_SIZE);
+    console.log(`[getMembersByIds] looking up ${pageIds.length} member ID(s) in ${chunks.length} batch(es)`);
+    for (const [index, chunk] of chunks.entries()) {
+      // One failed batch must not fail the whole list: retry once, then skip it and report.
+      let result: any;
+      try {
+        result = await queryChunk(chunk);
+      } catch (firstError) {
+        console.warn(`[getMembersByIds] batch ${index + 1}/${chunks.length} failed, retrying: ${describe(firstError)}`);
+        try {
+          result = await queryChunk(chunk);
+        } catch (error) {
+          console.error(`[getMembersByIds] batch ${index + 1}/${chunks.length} skipped: ${describe(error)}`);
+          failedIds.push(...chunk);
+          continue;
+        }
+      }
       allMembers.push(...(result.members || []));
+      const foundIds = new Set((result.members || []).map((member: any) => member._id));
+      const missingIds = chunk.filter(id => !foundIds.has(id));
+      console.log(
+        `[getMembersByIds] batch ${index + 1}/${chunks.length}: requested ${chunk.length}, found ${foundIds.size}` +
+        ` (query total ${result.metadata?.total ?? 'n/a'})${missingIds.length ? ` | missing ${missingIds.length}` : ''}`
+      );
+      // Diagnose 3 missing IDs per request (not per batch, to keep large rules fast):
+      // a member the query skipped, a contact-only ID, or nothing at all.
+      for (const id of missingIds.slice(0, 3 - diagnosed)) {
+        diagnosed++;
+        const member: any = await elevatedGetMember(id, { fieldsets: ['FULL'] } as any).catch((error: any) => ({ error: describe(error) }));
+        const contact: any = await elevatedGetContact(id).catch((error: any) => ({ error: describe(error) }));
+        console.log(
+          `[getMembersByIds] missing ${id} | getMember: ${member?.error ? `not found (${member.error})` : `FOUND, status=${member?.status}`}` +
+          ` | getContact: ${contact?.error ? `not found (${contact.error})` : 'FOUND'}`
+        );
+      }
     }
+    console.log(`[getMembersByIds] done | found ${allMembers.length} of ${pageIds.length}${failedIds.length ? ` | ${failedIds.length} not loaded (failed batches)` : ''}`);
     return {
       members: allMembers,
-      total: limit !== undefined ? uniqueIds.length : allMembers.length
+      total: limit !== undefined ? uniqueIds.length : allMembers.length,
+      failedCount: failedIds.length,
     };
   }
 );
@@ -2173,69 +2236,33 @@ export const getCurrentMember = webMethod(
   }
 )
 
+// Member changes go through setRuleFamilyMembers so the quantity/subtotal triggers and the
+// wholesale gate survive (replacing the whole trigger used to drop them), and only changed pieces are rewritten.
+async function getDiscountRuleMemberIds(ruleId: string): Promise<string[]> {
+  const response = await getUnifiedRule(ruleId);
+  if (!response.success) throw new Error(response.error);
+  return extractMemberIdsFromDiscountTrigger(response.data.trigger);
+}
+
+function setDiscountRuleMembers(ruleId: string, memberIds: string[]) {
+  return setRuleFamilyMembers(ruleId, memberIds);
+}
+
 // Add or update members to an existing discount rule
 export const addMembersToDiscountRule = webMethod(
   Permissions.Anyone,
   async (ruleId: string, memberIds: string[]) => {
     try {
-      // 1. Get the current rule to retrieve the latest revision
-      const elevatedGetDiscountRule = auth.elevate(discountRules.getDiscountRule);
-      const currentRule = await elevatedGetDiscountRule(ruleId);
-
-      // 2. Update the rule with the new member IDs
-      const updateData: any = {
-        revision: currentRule.revision,
-        trigger: {
-          triggerType: 'CUSTOMER_ELIGIBILITY' as any,
-          customerEligibility: {
-            eligibilityType: 'INDIVIDUAL_MEMBERS',
-            individualMembersInfo: {
-              memberIds: memberIds // Array of member GUIDs
-            }
-          }
-        }
-      };
-
-      const result = await discountRules.updateDiscountRule(ruleId, updateData);
+      const result = await setDiscountRuleMembers(ruleId, memberIds);
       return {
         success: true,
-        data: result
+        changedPieces: result.changedPieces
       };
     } catch (error) {
       throw new Error(`Failed to add members to discount rule: ${(error as Error).message}`);
     }
   }
 );
-
-/**
- * Helper function to handle customer eligibility for discount rules.
- */
-async function handleDiscountMemberEligibility(ruleId: string, memberIds: string[], isNew: boolean) {
-  try {
-    const elevatedUpdateDiscountRule = auth.elevate(discountRules.updateDiscountRule);
-    const elevatedGetDiscountRule = auth.elevate(discountRules.getDiscountRule);
-
-    // If it's a new rule or we need the current revision, fetch it first
-    // Note: Wix DiscountRules API requires the correct revision for updates
-    const currentRule = await elevatedGetDiscountRule(ruleId);
-
-    const updateData: any = {
-      revision: currentRule.revision,
-      trigger: {
-        triggerType: 'CUSTOMER_ELIGIBILITY' as any,
-        customerEligibility: {
-          eligibilityType: 'INDIVIDUAL_MEMBERS',
-          individualMembersInfo: {
-            memberIds: memberIds
-          }
-        }
-      }
-    };
-    return await elevatedUpdateDiscountRule(ruleId, updateData);
-  } catch (error: any) {
-    throw new Error(`Failed to update member eligibility: ${error.message}`);
-  }
-}
 
 export const createUnifiedRule = webMethod(
   Permissions.Admin,
@@ -2254,7 +2281,6 @@ export const createUnifiedRule = webMethod(
         categoryIds,
         productIds,
         catalogAppId: ruleCatalogAppId,
-        triggerId,
         triggerAppId,
         memberIds,
         isActive = true,
@@ -2449,22 +2475,10 @@ export const createUnifiedRule = webMethod(
         });
       }
 
-      if (triggers.length === 0 && triggerId && triggerAppId) {
-        if (!isValidGuid(triggerAppId)) {
-          throw new Error(`triggerAppId must be a valid GUID format (e.g., "12345678-1234-1234-1234-123456789abc"), received: ${triggerAppId}`);
-        }
-        discountRule.trigger = {
-          triggerType: 'CUSTOM',
-          customTrigger: { _id: triggerId, appId: triggerAppId }
-        };
-      } else if (triggers.length === 1) {
-        discountRule.trigger = triggers[0];
-      } else if (triggers.length > 1) {
-        discountRule.trigger = {
-          triggerType: 'AND',
-          and: { triggers }
-        };
+      if (triggerAppId && !isValidGuid(triggerAppId)) {
+        throw new Error(`triggerAppId must be a valid GUID format (e.g., "12345678-1234-1234-1234-123456789abc"), received: ${triggerAppId}`);
       }
+      discountRule.trigger = buildGatedTrigger(triggers);
 
       try {
         const elevatedCreateRule = auth.elevate(discountRules.createDiscountRule);
@@ -2485,14 +2499,7 @@ export const createUnifiedRule = webMethod(
               }
             };
 
-            if (otherTriggers.length === 0) {
-              batchRule.trigger = memberTrigger;
-            } else {
-              batchRule.trigger = {
-                triggerType: 'AND',
-                and: { triggers: [memberTrigger, ...otherTriggers] }
-              };
-            }
+            batchRule.trigger = buildGatedTrigger([memberTrigger, ...otherTriggers]);
 
             const result = await elevatedCreateRule(batchRule);
             const createdRule = (result as any).discountRule || result;
@@ -2807,11 +2814,7 @@ export const updateUnifiedRule = webMethod(
         });
       }
 
-      if (triggers.length === 1) {
-        newRule.trigger = triggers[0];
-      } else if (triggers.length > 1) {
-        newRule.trigger = { triggerType: 'AND', and: { triggers } };
-      }
+      newRule.trigger = buildGatedTrigger(triggers);
 
       // Create the replacement before removing the old rule; Wix does not allow patching these fields.
       // (discounts.values and trigger.triggerType are not patchable via updateDiscountRule)
@@ -2835,9 +2838,7 @@ export const updateUnifiedRule = webMethod(
             }
           };
 
-          batchRule.trigger = otherTriggers.length === 0
-            ? memberTrigger
-            : { triggerType: 'AND', and: { triggers: [memberTrigger, ...otherTriggers] } };
+          batchRule.trigger = buildGatedTrigger([memberTrigger, ...otherTriggers]);
 
           const result = await elevatedCreateRule(batchRule);
           const createdRule = (result as any).discountRule || result;
@@ -2969,45 +2970,14 @@ export const removeMembersFromDiscountRule = webMethod(
   Permissions.Anyone,
   async (ruleId: string, memberIdsToRemove: string[]) => {
     try {
-      const elevatedGetDiscountRule = auth.elevate(discountRules.getDiscountRule);
-      const currentRule = await elevatedGetDiscountRule(ruleId);
-
-      // Get current member IDs
-      const currentMemberIds = currentRule.trigger?.customerEligibility?.individualMembersInfo?.memberIds || [];
-
-      // Filter out the members to remove
+      const currentMemberIds = await getDiscountRuleMemberIds(ruleId);
       const updatedMemberIds = currentMemberIds.filter(
         memberId => !memberIdsToRemove.includes(memberId)
       );
-
-      let updateData: any = {
-        name: currentRule.name,
-        active: currentRule.active,
-        discounts: currentRule.discounts,
-      };
-
-      if (currentRule.activeTimeInfo) {
-        updateData.activeTimeInfo = currentRule.activeTimeInfo;
-      }
-
-      if (updatedMemberIds.length > 0) {
-        updateData.trigger = {
-          triggerType: 'CUSTOMER_ELIGIBILITY',
-          customerEligibility: {
-            eligibilityType: 'INDIVIDUAL_MEMBERS',
-            individualMembersInfo: {
-              memberIds: updatedMemberIds
-            }
-          }
-        };
-      }
-
-      await auth.elevate(discountRules.deleteDiscountRule)(ruleId);
-      const result = await discountRules.createDiscountRule(updateData);
-
+      const result = await setDiscountRuleMembers(ruleId, updatedMemberIds);
       return {
         success: true,
-        data: result,
+        changedPieces: result.changedPieces,
         removedCount: currentMemberIds.length - updatedMemberIds.length,
         remainingCount: updatedMemberIds.length
       };
@@ -3058,18 +3028,249 @@ async function removeMemberFromAccessGroupsInternal(memberIds: string[]): Promis
   return updatedGroups;
 }
 
+// --- Piece-level member changes ---
+// A rule with more than MEMBER_BATCH_SIZE members is several Wix rules ("pieces") sharing a
+// ruleFamilyId. Member changes rewrite only the pieces whose member list changes (about 5 Wix
+// calls each). Rewriting every piece, as updateUnifiedRule does, exceeds the Workers per-request
+// subrequest limit on large rules ("Too many subrequests by single Worker invocation").
+
+async function listPhysicalRules(): Promise<any[]> {
+  let result = await auth.elevate(discountRules.queryDiscountRules)().limit(100).find();
+  const rules = [...result.items];
+  while (result.hasNext()) { result = await result.next(); rules.push(...result.items); }
+  return rules;
+}
+
+const createdTime = (rule: any) => new Date(rule._createdDate || 0).getTime();
+
+// Creates a copy of `piece` with a new member list; the caller deletes the old piece afterwards.
+async function createPieceCopy(piece: any, memberIds: string[], mirror: any, familyId: string, active: boolean): Promise<any> {
+  const otherTriggers = flattenTriggers(piece.trigger).filter(trigger => trigger?.triggerType !== 'CUSTOMER_ELIGIBILITY');
+  const memberTrigger = {
+    triggerType: 'CUSTOMER_ELIGIBILITY',
+    customerEligibility: { eligibilityType: 'INDIVIDUAL_MEMBERS', individualMembersInfo: { memberIds } },
+  };
+  const replacement: any = {
+    name: piece.name,
+    active,
+    discounts: piece.discounts,
+    trigger: buildGatedTrigger([...(memberIds.length ? [memberTrigger] : []), ...otherTriggers]),
+  };
+  if (piece.activeTimeInfo) replacement.activeTimeInfo = piece.activeTimeInfo;
+  const result = await auth.elevate(discountRules.createDiscountRule)(replacement);
+  const created = (result as any).discountRule || result;
+  await mirrorRuleSave({ ...created, ...ruleMetadata({}, mirror), ruleFamilyId: familyId });
+  return created;
+}
+
+async function deletePiece(pieceId: string): Promise<void> {
+  await auth.elevate(discountRules.deleteDiscountRule)(pieceId);
+  await mirrorRuleDelete(pieceId);
+}
+
+async function changeFamilyMembers(pieces: any[], mirrors: any[], add: string[], remove: string[]): Promise<number> {
+  const sorted = [...pieces].sort((a, b) => createdTime(a) - createdTime(b));
+  const mirrorOf = (piece: any) => mirrors.find(mirror => mirror._id === piece._id);
+  const existingFamilyId = mirrorOf(sorted[0])?.ruleFamilyId;
+  const familyId = existingFamilyId || crypto.randomUUID();
+  const removeSet = new Set(remove);
+
+  const current = new Map(sorted.map(piece => [piece._id, extractMemberIdsFromDiscountTrigger(piece.trigger)]));
+  const next = new Map(sorted.map(piece => [piece._id, current.get(piece._id)!.filter(id => !removeSet.has(id))]));
+  const present = new Set([...next.values()].flat());
+  const toAdd = [...new Set(add)].filter(id => !present.has(id) && !removeSet.has(id));
+  // New members fill pieces that have room first, then go into new pieces.
+  for (const piece of sorted) {
+    const ids = next.get(piece._id)!;
+    while (toAdd.length && ids.length < MEMBER_BATCH_SIZE) ids.push(toAdd.shift()!);
+  }
+  const newPieces = chunkArray(toAdd, MEMBER_BATCH_SIZE);
+  const changed = sorted.filter(piece => next.get(piece._id)!.join() !== current.get(piece._id)!.join());
+  const familyEmpty = newPieces.length === 0 && [...next.values()].every(ids => ids.length === 0);
+
+  for (const ids of newPieces) {
+    await createPieceCopy(sorted[0], ids, mirrorOf(sorted[0]), familyId, sorted[0].active);
+  }
+  if (newPieces.length && !existingFamilyId) {
+    // The original piece joins the new family so the rule still lists as one.
+    for (const piece of sorted.filter(piece => !changed.includes(piece))) {
+      await mirrorRuleSave({ ...piece, ...ruleMetadata({}, mirrorOf(piece)), ruleFamilyId: familyId });
+    }
+  }
+  for (const piece of changed) {
+    const ids = next.get(piece._id)!;
+    const keepEmpty = familyEmpty && piece === sorted[0];
+    if (ids.length === 0 && !keepEmpty) {
+      // Other pieces still hold the rule's members (or one empty piece is kept), so drop this one.
+      await deletePiece(piece._id);
+      continue;
+    }
+    // A rule with no members left is kept but switched off, matching updateUnifiedRule.
+    await createPieceCopy(piece, ids, mirrorOf(piece), familyId, ids.length ? piece.active : false);
+    await deletePiece(piece._id);
+  }
+  return changed.length + newPieces.length;
+}
+
+function familyKey(rule: any, mirrors: any[]): string {
+  return mirrors.find(mirror => mirror._id === rule._id)?.ruleFamilyId || rule._id;
+}
+
+/**
+ * Sets a rule's full member list by rewriting only the pieces that change. Used by member
+ * edits and access-group sync; falls back to updateUnifiedRule when the rule's access groups change.
+ */
+export async function setRuleFamilyMembers(
+  ruleId: string,
+  memberIds: string[],
+  accessGroups?: string[],
+): Promise<{ success: boolean; changedPieces: number }> {
+  const [rules, mirrors] = [await listPhysicalRules(), await getMirroredRules()];
+  const mirror = mirrors.find(item => item._id === ruleId);
+  const currentGroups: string[] = ruleMetadata({}, mirror).accessGroups || [];
+  if (accessGroups && (accessGroups.length !== currentGroups.length || accessGroups.some(id => !currentGroups.includes(id)))) {
+    await updateUnifiedRule(ruleId, { memberIds, accessGroups, ...(memberIds.length === 0 ? { active: false } : {}) } as any);
+    return { success: true, changedPieces: -1 };
+  }
+  const key = mirror?.ruleFamilyId || ruleId;
+  const pieces = rules.filter(rule => rule._id === ruleId || familyKey(rule, mirrors) === key);
+  if (!pieces.length) throw new Error(`Pricing rule ${ruleId} was not found.`);
+  const current = new Set(pieces.flatMap(piece => extractMemberIdsFromDiscountTrigger(piece.trigger)));
+  const target = new Set(memberIds);
+  const add = [...target].filter(id => !current.has(id));
+  const remove = [...current].filter(id => !target.has(id));
+  if (!add.length && !remove.length) return { success: true, changedPieces: 0 };
+  const changedPieces = await changeFamilyMembers(pieces, mirrors, add, remove);
+  console.log(`[setRuleFamilyMembers] rule "${pieces[0].name}" | +${add.length} -${remove.length} member(s) | ${changedPieces} piece(s) rewritten`);
+  return { success: true, changedPieces };
+}
+
+// Best-effort per rule: one rule that can't be rewritten must not leave the member in the others.
 async function removeMemberFromDiscountRulesInternal(memberId: string): Promise<number> {
-  const rules = (await queryAllRules())._items;
-  let updatedRules = 0;
+  const [rules, mirrors] = [await listPhysicalRules(), await getMirroredRules()];
+  const families = new Map<string, any[]>();
   for (const rule of rules) {
-    const currentIds = extractMemberIdsFromDiscountTrigger(rule.trigger);
-    if (!currentIds.includes(memberId)) continue;
-    const memberIds = currentIds.filter(id => id !== memberId);
-    await updateUnifiedRule(rule._id, { memberIds, ...(memberIds.length === 0 ? { active: false } : {}) });
-    updatedRules++;
+    const key = familyKey(rule, mirrors);
+    families.set(key, [...families.get(key) || [], rule]);
+  }
+  const listed = [...families.values()].filter(pieces =>
+    pieces.some(piece => extractMemberIdsFromDiscountTrigger(piece.trigger).includes(memberId)));
+  console.log(`[revokeWholesaleAccess] member ${memberId} is listed in ${listed.length} of ${families.size} pricing rule(s)`);
+  let updatedRules = 0;
+  const failed: string[] = [];
+  for (const pieces of listed) {
+    const name = pieces[0].name || pieces[0]._id;
+    try {
+      const changedPieces = await changeFamilyMembers(pieces, mirrors, [], [memberId]);
+      updatedRules++;
+      console.log(`[revokeWholesaleAccess] removed member ${memberId} from rule "${name}" | ${changedPieces} of ${pieces.length} piece(s) rewritten`);
+    } catch (error) {
+      console.error(`[revokeWholesaleAccess] could not remove member ${memberId} from rule "${name}"`, error);
+      failed.push(`"${name}"`);
+    }
+  }
+  if (failed.length) {
+    throw new Error(`Removed from ${updatedRules} pricing rule(s); still listed in ${failed.join(', ')}`);
   }
   return updatedRules;
 }
+
+/**
+ * Re-saves app-created rules that predate the wholesale gate so retail shoppers stop
+ * getting them. Only rules mirrored in UpdatedRules are touched, never the merchant's own promos.
+ */
+export const repairWholesaleRuleGates = webMethod(
+  Permissions.Admin,
+  async (): Promise<{ success: boolean; repaired: number; failed: Array<{ id: string; name: string; error: string }> }> => {
+    const mirroredIds = new Set((await getMirroredRules()).map(rule => rule._id));
+    const rules = (await queryAllRules())._items.filter(rule => mirroredIds.has(rule._id) && !hasWholesaleGate(rule.trigger));
+    console.log(`[repairWholesaleRuleGates] ${rules.length} app rule(s) missing the wholesale gate`);
+    let repaired = 0;
+    const failed: Array<{ id: string; name: string; error: string }> = [];
+    for (const rule of rules) {
+      try {
+        const result = await updateUnifiedRule(rule._id, {});
+        repaired++;
+        console.log(`[repairWholesaleRuleGates] gated rule "${rule.name}" | old rule ${rule._id} -> new rule ${result.data?._id}`);
+      } catch (error) {
+        const message = (error as Error)?.message || String(error);
+        console.error(`[repairWholesaleRuleGates] rule "${rule.name}" (${rule._id}) failed: ${message}`, error);
+        failed.push({ id: rule._id, name: rule.name, error: message });
+      }
+    }
+    return { success: failed.length === 0, repaired, failed };
+  }
+);
+
+// The dashboard used to split large member lists itself and create each 100-member piece as
+// its own rule, so pieces of one rule got separate ruleFamilyIds and listed as separate rules.
+const SPLIT_PIECE_WINDOW_MS = 10 * 60 * 1000;
+
+function stableStringify(value: any): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+function ruleSettingsKey(rule: any): string {
+  return stableStringify({
+    name: rule.name,
+    active: rule.active,
+    discounts: rule.discounts?.values,
+    activeTimeInfo: rule.activeTimeInfo,
+    triggers: flattenTriggers(rule.trigger).filter(trigger => trigger?.triggerType !== 'CUSTOMER_ELIGIBILITY'),
+  });
+}
+
+/**
+ * Regroups those pieces into one family by updating only their UpdatedRules records; the Wix
+ * discount rules are untouched, so checkout is unaffected. A group qualifies only when its pieces
+ * have identical settings, were created minutes apart, and all but one hold exactly MEMBER_BATCH_SIZE members.
+ */
+export const mergeSplitRuleFamilies = webMethod(
+  Permissions.Admin,
+  async (): Promise<{ success: boolean; merged: number }> => {
+    const mirrorById = new Map((await getMirroredRules()).map(mirror => [mirror._id, mirror]));
+    let result = await auth.elevate(discountRules.queryDiscountRules)().descending('_createdDate').limit(100).find();
+    const rules = [...result.items];
+    while (result.hasNext()) { result = await result.next(); rules.push(...result.items); }
+
+    const groups = new Map<string, any[]>();
+    for (const rule of rules) {
+      if (!rule._id || !mirrorById.has(rule._id)) continue;
+      const key = ruleSettingsKey(rule);
+      groups.set(key, [...groups.get(key) || [], rule]);
+    }
+
+    let merged = 0;
+    for (const group of groups.values()) {
+      const familyOf = (rule: any) => mirrorById.get(rule._id)?.ruleFamilyId || rule._id;
+      if (new Set(group.map(familyOf)).size < 2) continue;
+
+      const pieces = [...group].sort((a, b) => new Date(a._createdDate).getTime() - new Date(b._createdDate).getTime());
+      const createdTogether = pieces.every((piece, i) =>
+        i === 0 || new Date(piece._createdDate).getTime() - new Date(pieces[i - 1]._createdDate).getTime() <= SPLIT_PIECE_WINDOW_MS);
+      const fullPieces = pieces.filter(piece => extractMemberIdsFromDiscountTrigger(piece.trigger).length === MEMBER_BATCH_SIZE).length;
+      if (!createdTogether || fullPieces < pieces.length - 1) {
+        console.log(`[mergeSplitRuleFamilies] skipped ${pieces.length} look-alike rule(s) named "${pieces[0].name}": not split pieces of one rule`);
+        continue;
+      }
+
+      const familyId = familyOf(pieces[0]);
+      for (const piece of pieces) {
+        const mirror = mirrorById.get(piece._id);
+        if (mirror.ruleFamilyId === familyId) continue;
+        await auth.elevate(items.save)(UPDATED_RULES_COLLECTION, { ...mirror, ruleFamilyId: familyId });
+      }
+      merged++;
+      console.log(`[mergeSplitRuleFamilies] merged ${pieces.length} piece(s) of "${pieces[0].name}" into family ${familyId}`);
+    }
+    return { success: true, merged };
+  }
+);
 
 /**
  * Strip a member from access groups and pricing rules after reject/revoke.
@@ -3091,22 +3292,33 @@ export const revokeWholesaleAccess = webMethod(
       };
     }
 
+    let accessGroupsUpdated = 0;
     try {
-      const accessGroupsUpdated = await removeMemberFromAccessGroupsInternal(
-        [normalizedMemberId, normalizedContactId].filter(Boolean),
+      // Rules list member IDs, so resolve the member when only the contact is known.
+      const resolvedMemberId = normalizedMemberId ||
+        String((await findMemberByContactId(normalizedContactId))?._id || '');
+      console.log(
+        `[revokeWholesaleAccess] start | memberId=${normalizedMemberId || 'none'} | contactId=${normalizedContactId || 'none'}` +
+        ` | resolvedMemberId=${resolvedMemberId || 'none (contact has no site member, no pricing rules to clean)'}`
       );
-      const rulesUpdated = normalizedMemberId ? await removeMemberFromDiscountRulesInternal(normalizedMemberId) : 0;
+      accessGroupsUpdated = await removeMemberFromAccessGroupsInternal(
+        [resolvedMemberId, normalizedContactId].filter(Boolean),
+      );
+      console.log(`[revokeWholesaleAccess] removed from ${accessGroupsUpdated} access group(s)`);
+      const rulesUpdated = resolvedMemberId ? await removeMemberFromDiscountRulesInternal(resolvedMemberId) : 0;
+      console.log(`[revokeWholesaleAccess] done | member ${resolvedMemberId || 'none'} | access groups ${accessGroupsUpdated} | pricing rules ${rulesUpdated}`);
       return {
         success: true,
-        memberId: normalizedMemberId,
+        memberId: resolvedMemberId,
         accessGroupsUpdated,
         rulesUpdated,
       };
     } catch (error) {
+      console.error(`[revokeWholesaleAccess] failed | memberId=${normalizedMemberId || 'none'} | contactId=${normalizedContactId || 'none'}`, error);
       return {
         success: false,
         error: (error as Error)?.message || String(error),
-        accessGroupsUpdated: 0,
+        accessGroupsUpdated,
         rulesUpdated: 0,
       };
     }
@@ -3117,62 +3329,12 @@ export const appendMembersToDiscountRule = webMethod(
   Permissions.Anyone,
   async (ruleId: string, newMemberIds: string[]) => {
     try {
-      const elevatedGetDiscountRule = auth.elevate(discountRules.getDiscountRule);
-      const currentRule = await elevatedGetDiscountRule(ruleId);
-
-      // Get current member IDs
-      const currentMemberIds = currentRule.trigger?.customerEligibility?.individualMembersInfo?.memberIds || [];
-
-      // Merge and deduplicate
+      const currentMemberIds = await getDiscountRuleMemberIds(ruleId);
       const allMemberIds = [...new Set([...currentMemberIds, ...newMemberIds])];
-
-      // Create replacement rule data
-      const updateData: any = {
-        name: currentRule.name,
-        active: currentRule.active,
-        discounts: currentRule.discounts,
-      };
-
-      if (currentRule.activeTimeInfo) {
-        updateData.activeTimeInfo = currentRule.activeTimeInfo;
-      }
-      await auth.elevate(discountRules.deleteDiscountRule)(ruleId);
-
-      if (allMemberIds.length === 0) {
-        const result = await discountRules.createDiscountRule(updateData);
-        return {
-          success: true,
-          data: result,
-          previousCount: currentMemberIds.length,
-          newCount: 0,
-          addedCount: 0
-        };
-      }
-
-      const chunks = chunkArray(allMemberIds, MEMBER_BATCH_SIZE);
-      if (chunks.length > 1) {
-      }
-      let firstResult: any = null;
-
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        const batchData = {
-          ...updateData,
-          trigger: {
-            triggerType: 'CUSTOMER_ELIGIBILITY',
-            customerEligibility: {
-              eligibilityType: 'INDIVIDUAL_MEMBERS',
-              individualMembersInfo: { memberIds: chunk }
-            }
-          }
-        };
-        const result = await discountRules.createDiscountRule(batchData);
-        if (!firstResult) firstResult = result;
-      }
-
+      const result = await setDiscountRuleMembers(ruleId, allMemberIds);
       return {
         success: true,
-        data: firstResult,
+        changedPieces: result.changedPieces,
         previousCount: currentMemberIds.length,
         newCount: allMemberIds.length,
         addedCount: allMemberIds.length - currentMemberIds.length

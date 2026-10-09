@@ -12,6 +12,7 @@ import { exportCustomersToCSV, memberExistsInAccessGroups, removeUserFromAllAcce
 import { type DashboardStats, formatRelativeDate } from './CustomerView/useDashboardStats';
 import { DashIcons } from './Dashboard/icons';
 import { SitePluginsCard } from './SitePluginsCard';
+import { useDebouncedCallback } from '../utils/useDebouncedCallback';
 import styles from './Dashboard/dashboard.module.css';
 
 import { type AccessGroup } from './AccessGroupType';
@@ -115,7 +116,8 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
     const [editingCustomer, setEditingCustomer] = useState<WholesaleApplication | null>(null);
     const [statusFilter] = useState<StatusFilter>('all');
     const [showBanner, setShowBanner] = useState(false);
-    const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Only the newest request may update the list, so a slow earlier search can't overwrite it.
+    const latestFetchRef = useRef(0);
 
     // Delete confirmation modal state
     const [showDeleteModal, setShowDeleteModal] = useState(false);
@@ -152,9 +154,11 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
     };
 
     const fetchCustomers = async (search: string = ''): Promise<void> => {
+        const requestId = ++latestFetchRef.current;
         try {
             setIsLoading(true);
             const contacts = await searchWholesaleContacts(search);
+            if (requestId !== latestFetchRef.current) return;
             const transformedCustomers: WholesaleApplication[] = (contacts || []).map((contact: any) => {
                 const firstName = contact.info?.name?.first || '';
                 const lastName = contact.info?.name?.last || '';
@@ -184,28 +188,32 @@ export const CustomersView: FC<CustomersViewProps> = ({ stats, onNavigate }) => 
             setCustomers(transformedCustomers);
             if (!search) setTotalCustomers(transformedCustomers.length);
         } catch {
+            if (requestId !== latestFetchRef.current) return;
             dashboard.showToast({
                 message: "Failed to load customers",
                 type: "error",
             });
         } finally {
-            setIsLoading(false);
+            if (requestId === latestFetchRef.current) setIsLoading(false);
         }
     };
 
-    /** Debounced handler for the search box — calls the server after 400ms idle. */
+    const debouncedFetchCustomers = useDebouncedCallback(fetchCustomers, 400);
+
+    /** Search box handler: calls the server after 400ms idle; clearing the box reloads at once. */
     const handleSearchChange = (value: string): void => {
         setSearchTerm(value);
-        if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-        searchDebounceRef.current = setTimeout(() => fetchCustomers(value), 400);
+        if (value.trim()) {
+            debouncedFetchCustomers(value);
+        } else {
+            debouncedFetchCustomers.cancel();
+            fetchCustomers('');
+        }
     };
 
     useEffect(() => {
         fetchAccessGroups();
         fetchCustomers('');
-        return () => {
-            if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-        };
     }, []);
 
     useEffect(() => {
