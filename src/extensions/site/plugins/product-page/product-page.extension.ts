@@ -5,7 +5,7 @@ export default extensions.sitePlugin({
   name: 'Wholesale Product Price',
   marketData: {
     name: 'Wholesale Product Price',
-    description: 'Shows the wholesale price to approved B2B members on Wix Stores product pages.',
+    description: 'Shows the wholesale price to approved B2B members on Wix Stores product pages, and optionally the retail price to everyone else.',
     logoUrl: '{{BASE_URL}}/product-page-logo.svg',
   },
   placements: [

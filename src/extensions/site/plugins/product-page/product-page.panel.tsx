@@ -8,6 +8,7 @@ import {
   Box,
   Text,
   TextButton,
+  ToggleSwitch,
 } from '@wix/design-system';
 import '@wix/design-system/styles.global.css';
 
@@ -23,6 +24,7 @@ const extractFontFamily = (fontString: string): string => {
 const Panel: FC = () => {
   const [priceColor, setPriceColor] = useState(DEFAULT_PRICE_COLOR);
   const [priceFont, setPriceFont] = useState('');
+  const [showRetailPrice, setShowRetailPrice] = useState(false);
 
   useEffect(() => {
     widget.getProp('price-color').then((value) => {
@@ -33,6 +35,11 @@ const Panel: FC = () => {
     widget.getProp('price-font').then((value) => {
       const nextFont = typeof value === 'string' ? value : '';
       setPriceFont(nextFont);
+    });
+
+    // Off unless the merchant turns it on, so stores still showing Wix's own price don't show it twice.
+    widget.getProp('show-retail-price').then((value) => {
+      setShowRetailPrice(value === 'true');
     });
   }, []);
 
@@ -48,7 +55,26 @@ const Panel: FC = () => {
       <SidePanel width="300">
         <SidePanel.Header title="Product Price Styles" />
         <SidePanel.Content noPadding>
-          <SidePanel.Section title="Wholesale Price">
+          <SidePanel.Section title="Retail Price">
+            <Box direction="vertical" paddingLeft="SP5" paddingRight="SP5" paddingTop="SP4" paddingBottom="SP4" gap="SP2">
+              <Box align="space-between" verticalAlign="middle" gap="SP3">
+                <Text size="small">Show retail price to non-wholesale visitors</Text>
+                <ToggleSwitch
+                  size="small"
+                  checked={showRetailPrice}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setShowRetailPrice(next);
+                    widget.setProp('show-retail-price', next ? 'true' : 'false');
+                  }}
+                />
+              </Box>
+              <Text size="tiny" secondary>
+                Turn on if you've hidden Wix's own product price, so shoppers who aren't approved wholesalers still see a price.
+              </Text>
+            </Box>
+          </SidePanel.Section>
+          <SidePanel.Section title="Price Styles">
             <Box direction="vertical" paddingLeft="SP5" paddingRight="SP5" paddingTop="SP4" paddingBottom="SP8" gap="SP4">
               <Box align="space-between" verticalAlign="middle">
                 <Text size="small">Text color</Text>

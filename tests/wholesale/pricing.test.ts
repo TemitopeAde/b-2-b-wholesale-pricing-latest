@@ -709,3 +709,51 @@ describe("member changes on a split rule rewrite only the affected pieces", () =
     expect(sdk.deleteRule.mock.calls.map(([id]) => id)).toEqual(["c"]);
   });
 });
+
+describe("product page price for visitors without a wholesale price", () => {
+  const retailMember = () => {
+    sdk.token.mockResolvedValue({ active: true, subjectType: "USER", subjectId: "u", siteId: "site", instanceId: "instance" });
+    sdk.getMember.mockResolvedValue({ _id: "retail", contactId: "contact" });
+    sdk.contact.mockResolvedValue({ info: { extendedFields: { items: { "custom.customer": "" } } } });
+    sdk.fields.mockReturnValue(builder([{ key: "custom.customer", displayName: "customer" }]));
+  };
+
+  beforeEach(() => sdk.products.mockReset());
+
+  it("returns no retail price and skips the product lookup unless the plugin asks for it", async () => {
+    retailMember();
+    sdk.products.mockResolvedValue({ product: { priceData: { price: 50, currency: "USD" } } });
+    const result = await pricing.getProductWholesalePrice("product", "USD", "retail");
+    expect(result).toMatchObject({ eligible: false, hasWholesalePrice: false, reason: "not_approved" });
+    expect(result.formattedRetailPrice).toBeUndefined();
+    expect(sdk.products).not.toHaveBeenCalled();
+  });
+
+  it("shows a retail customer the store price, preferring the sale price", async () => {
+    retailMember();
+    sdk.products.mockResolvedValue({ product: { priceData: { price: 50, discountedPrice: 40, currency: "USD" } } });
+    expect(await pricing.getProductWholesalePrice("product", "USD", "retail", true)).toMatchObject({
+      eligible: false,
+      hasWholesalePrice: false,
+      reason: "not_approved",
+      retailPrice: 40,
+      formattedRetailPrice: "$40.00",
+    });
+  });
+
+  it("uses the regular price when there is no sale", async () => {
+    retailMember();
+    sdk.products.mockResolvedValue({ product: { priceData: { price: 50, currency: "USD" } } });
+    expect(await pricing.getProductWholesalePrice("product", "USD", "retail", true)).toMatchObject({
+      formattedRetailPrice: "$50.00",
+    });
+  });
+
+  it("still answers without a price when the product can't be loaded", async () => {
+    retailMember();
+    sdk.products.mockResolvedValue({ product: null });
+    const result = await pricing.getProductWholesalePrice("product", "USD", "retail", true);
+    expect(result).toMatchObject({ eligible: false, hasWholesalePrice: false, reason: "not_approved" });
+    expect(result.formattedRetailPrice).toBeUndefined();
+  });
+});

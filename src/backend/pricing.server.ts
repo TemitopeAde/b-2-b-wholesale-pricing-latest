@@ -876,13 +876,52 @@ async function resolveProductWholesalePrice(
   }
 }
 
+// The price a retail shopper pays: the sale price when there is one, otherwise the regular price.
+function extractRetailDisplayPrice(product: any): number {
+  const salePrice = [
+    product?.priceData?.discountedPrice,
+    product?.convertedPriceData?.discountedPrice,
+    product?.price?.discountedPrice,
+    product?.actualPriceRange?.minValue?.amount,
+  ].map(coercePriceNumber).find(price => price > 0);
+  return salePrice || extractProductBasePrice(product);
+}
+
+// Visitors without a wholesale price (guests, retail customers, or wholesale customers with no
+// matching rule) can be shown the store's retail price instead, when the product page plugin asks for it.
+async function withRetailPrice(
+  productId: string,
+  siteCurrency: string,
+  result: ProductWholesalePriceResponse
+): Promise<ProductWholesalePriceResponse> {
+  try {
+    const product = await fetchProductById(productId);
+    const price = extractRetailDisplayPrice(product);
+    if (!price) return result;
+    const { resolvedCurrency } = await resolveCurrencyDetails(product, siteCurrency);
+    return { ...result, retailPrice: price, formattedRetailPrice: formatCurrencyAmount(price, resolvedCurrency) };
+  } catch (error) {
+    console.warn(`[getProductWholesalePrice] retail price unavailable for product ${productId}`, error);
+    return result;
+  }
+}
+
 export const getProductWholesalePrice = webMethod(
   Permissions.Anyone,
-  async (productId: string, currencyCode: string, memberIdOverride?: string): Promise<ProductWholesalePriceResponse> =>
-    resolveProductWholesalePrice(productId, {
-      memberId: memberIdOverride,
-      siteCurrency: normalizeCurrencyCode(currencyCode),
-    })
+  async (
+    productId: string,
+    currencyCode: string,
+    memberIdOverride?: string | null,
+    includeRetailPrice: boolean = false
+  ): Promise<ProductWholesalePriceResponse> => {
+    const siteCurrency = normalizeCurrencyCode(currencyCode);
+    const result = await resolveProductWholesalePrice(productId, {
+      memberId: memberIdOverride || undefined,
+      siteCurrency,
+    });
+    // The retail lookup costs an extra product fetch, so it only runs when the plugin's toggle is on.
+    return result.hasWholesalePrice || !includeRetailPrice ? result : withRetailPrice(productId, siteCurrency, result);
+  }
 );
 
 function extractProductSlugValue(product: any): string | undefined {

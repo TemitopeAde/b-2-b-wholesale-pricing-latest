@@ -10,6 +10,8 @@ type Props = {
   productId?: string;
   priceColor?: string;
   priceFont?: string;
+  /** "true" shows the retail price to visitors without a wholesale price (panel toggle, off by default). */
+  showRetailPrice?: string;
 };
 
 const emptyState: ProductWholesalePriceResponse = {
@@ -76,15 +78,16 @@ type ResolvedHostConfig = {
   productId?: string;
   priceColor?: string;
   priceFont?: string;
+  showRetailPrice?: string;
 };
 
 function findClosestCustomElementHost(probeNode?: HTMLElement | null): HTMLElement | null {
   return (
     probeNode?.parentElement?.closest(
-      '[productid],[product-id],[pricefont],[price-font],[pricecolor],[price-color]'
+      '[productid],[product-id],[pricefont],[price-font],[pricecolor],[price-color],[showretailprice],[show-retail-price]'
     ) ||
     document.querySelector(`.${styles.root}`)?.parentElement?.closest(
-      '[productid],[product-id],[pricefont],[price-font],[pricecolor],[price-color]'
+      '[productid],[product-id],[pricefont],[price-font],[pricecolor],[price-color],[showretailprice],[show-retail-price]'
     ) ||
     null
   );
@@ -108,10 +111,14 @@ function readHostConfig(host: HTMLElement | null): ResolvedHostConfig {
       host.getAttribute('pricefont') ||
       host.getAttribute('price-font') ||
       undefined,
+    showRetailPrice:
+      host.getAttribute('showretailprice') ||
+      host.getAttribute('show-retail-price') ||
+      undefined,
   };
 }
 
-const CustomElement: FC<Props> = ({ productId, priceColor, priceFont }) => {
+const CustomElement: FC<Props> = ({ productId, priceColor, priceFont, showRetailPrice }) => {
   const [state, setState] = useState<ProductWholesalePriceResponse>(emptyState);
   const [isLoading, setIsLoading] = useState(false);
   const { currency, isLoading: isCurrencyLoading, error: currencyError } = useSiteCurrency();
@@ -120,6 +127,7 @@ const CustomElement: FC<Props> = ({ productId, priceColor, priceFont }) => {
   const resolvedProductId = productId || resolvedHostConfig.productId;
   const resolvedPriceColor = priceColor || resolvedHostConfig.priceColor;
   const resolvedPriceFont = priceFont || resolvedHostConfig.priceFont;
+  const shouldShowRetailPrice = (showRetailPrice || resolvedHostConfig.showRetailPrice) === 'true';
   const normalizedFontFamily = normalizeFontFamily(resolvedPriceFont);
 
   useEffect(() => {
@@ -141,7 +149,7 @@ const CustomElement: FC<Props> = ({ productId, priceColor, priceFont }) => {
 
     observer.observe(host, {
       attributes: true,
-      attributeFilter: ['productid', 'product-id', 'pricecolor', 'price-color', 'pricefont', 'price-font'],
+      attributeFilter: ['productid', 'product-id', 'pricecolor', 'price-color', 'pricefont', 'price-font', 'showretailprice', 'show-retail-price'],
     });
 
     return () => {
@@ -165,7 +173,7 @@ const CustomElement: FC<Props> = ({ productId, priceColor, priceFont }) => {
     let isActive = true;
     setIsLoading(true);
 
-    getProductWholesalePrice(resolvedProductId, currency)
+    getProductWholesalePrice(resolvedProductId, currency, null, shouldShowRetailPrice)
       .then((response) => {
         if (isActive) {
           setState(response || emptyState);
@@ -185,7 +193,14 @@ const CustomElement: FC<Props> = ({ productId, priceColor, priceFont }) => {
     return () => {
       isActive = false;
     };
-  }, [resolvedProductId, currency, isCurrencyLoading, currencyError]);
+  }, [resolvedProductId, currency, isCurrencyLoading, currencyError, shouldShowRetailPrice]);
+
+  // Approved wholesalers with a matching rule see the wholesale price; everyone else sees the
+  // retail price only when the panel toggle is on, otherwise nothing (Wix's own price stays visible).
+  const showsWholesalePrice = state.eligible && state.hasWholesalePrice;
+  const displayedPrice = showsWholesalePrice
+    ? state.formattedWholesalePrice
+    : shouldShowRetailPrice ? state.formattedRetailPrice : undefined;
 
   return (
     <div
@@ -196,18 +211,17 @@ const CustomElement: FC<Props> = ({ productId, priceColor, priceFont }) => {
         <div className={styles.loaderRow}>
           <AnimatedDotsLoader />
         </div>
-      ) : !state.eligible || !state.hasWholesalePrice ? null : (
-        <>
-          <p
-            className={`font_8 wixui-rich-text__text ${styles.value}`}
-            style={{
-              color: resolvedPriceColor || undefined,
-              fontFamily: normalizedFontFamily || undefined,
-            }}
-          >
-            {state.formattedWholesalePrice}
-          </p>
-        </>
+      ) : !displayedPrice ? null : (
+        <p
+          className={`font_8 wixui-rich-text__text ${styles.value}`}
+          data-price-type={showsWholesalePrice ? 'wholesale' : 'retail'}
+          style={{
+            color: resolvedPriceColor || undefined,
+            fontFamily: normalizedFontFamily || undefined,
+          }}
+        >
+          {displayedPrice}
+        </p>
       )}
     </div>
   );
@@ -222,6 +236,7 @@ const customElement = reactToWebComponent(
       productId: 'string',
       priceColor: 'string',
       priceFont: 'string',
+      showRetailPrice: 'string',
     },
   }
 );

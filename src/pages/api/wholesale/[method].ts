@@ -7,9 +7,11 @@ import {
 import { createToolDispatcher } from "../../../backend/wholesale/dispatcher";
 import { toolHandlers } from "../../../backend/wholesale/runtime.server";
 
-const dispatch = createToolDispatcher(toolHandlers, async () =>
-  authorizeDashboard(await auth.getTokenInfo()),
-);
+const dispatch = createToolDispatcher(toolHandlers, async () => {
+  const token = await auth.getTokenInfo();
+  authorizeDashboard(token);
+  console.info("[wholesale API] instanceId:", token.instanceId);
+});
 
 export const POST: APIRoute = async ({ request, params }) => {
   try {

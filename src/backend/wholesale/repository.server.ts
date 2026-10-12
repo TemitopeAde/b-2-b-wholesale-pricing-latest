@@ -3,7 +3,7 @@ import { items } from "@wix/data";
 import * as pricing from "../pricing.server";
 import type { UpdateRuleInput } from "../types";
 import { customerEmail } from "./applications";
-import { isMemberWholesaleApproved } from "./approval.server";
+import { findUnapprovedMemberIds } from "./approval.server";
 import {
   record,
   text,
@@ -48,13 +48,12 @@ export const workflowDependencies: WorkflowDependencies = {
   },
   async validateMembers(requested) {
     if (!requested.length) return;
-    // Check only the members being added (a few Wix calls each). Loading every site member and
-    // wholesale contact exceeded the Workers per-request subrequest limit on large sites.
-    const rejected: typeof requested = [];
-    for (const requestedMember of requested) {
-      if (!(await isMemberWholesaleApproved(requestedMember.id)))
-        rejected.push(requestedMember);
-    }
+    // Check only the members being added, in bulk queries. Loading every site member, or
+    // checking members one by one, exceeded the Workers per-request subrequest limit.
+    const unapproved = new Set(
+      await findUnapprovedMemberIds(requested.map((member) => member.id)),
+    );
+    const rejected = requested.filter((member) => unapproved.has(member.id));
     if (rejected.length) {
       const names = rejected.map(
         (member) => member.name || member.email || member.id,
