@@ -244,6 +244,62 @@ export async function markInstallGuideSent(instanceId: string): Promise<void> {
   });
 }
 
+const REVIEW_PROMPT_CONFIG_TYPE = 'review-prompt';
+const REVIEW_PROMPT_SNOOZE_DAYS = 14;
+
+export type ReviewPromptAction = 'reviewed' | 'dismissed' | 'snoozed';
+
+export type ReviewPromptState = {
+  status: ReviewPromptAction;
+  snoozedUntil?: string | null;
+};
+
+async function getReviewPromptRecord(): Promise<any | null> {
+  const results = await elevatedQueryItems(CONFIGURATION_COLLECTION)
+    .eq('configType', REVIEW_PROMPT_CONFIG_TYPE)
+    .limit(1)
+    .find();
+
+  return results.items.length > 0 ? results.items[0] : null;
+}
+
+export const getReviewPromptState = webMethod(
+  Permissions.Anyone,
+  async (): Promise<ReviewPromptState | null> => {
+    const record = await getReviewPromptRecord();
+    if (!record?.status) return null;
+
+    const snoozedUntil = record.snoozedUntil ? new Date(record.snoozedUntil).toISOString() : null;
+    return { status: record.status, snoozedUntil };
+  }
+);
+
+export const updateReviewPromptState = webMethod(
+  Permissions.Anyone,
+  async (action: ReviewPromptAction): Promise<ReviewPromptState> => {
+    if (action !== 'reviewed' && action !== 'dismissed' && action !== 'snoozed') {
+      throw new Error(`Invalid review prompt action: ${action}`);
+    }
+
+    const record = await getReviewPromptRecord();
+    const snoozedUntil = action === 'snoozed'
+      ? new Date(Date.now() + REVIEW_PROMPT_SNOOZE_DAYS * 24 * 60 * 60 * 1000)
+      : null;
+
+    await auth.elevate(items.save)(CONFIGURATION_COLLECTION, {
+      _id: record?._id,
+      configType: REVIEW_PROMPT_CONFIG_TYPE,
+      status: action,
+      snoozedUntil,
+      updatedDate: new Date(),
+    }, {
+      suppressHooks: false,
+    });
+
+    return { status: action, snoozedUntil: snoozedUntil?.toISOString() ?? null };
+  }
+);
+
 export async function sendInstallGuideEmail(recipientEmail: string) {
   const htmlContent = getInstallGuideEmailHTML();
 

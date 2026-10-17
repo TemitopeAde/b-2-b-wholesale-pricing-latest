@@ -9,7 +9,13 @@ export type AppInstanceResponse = {
     freeTrialAvailable?: boolean;
     billing?: {
       packageName?: string;
-    };
+      /** When the paid plan was purchased or the free trial began (ISO string). */
+      timeStamp?: string;
+      freeTrialInfo?: {
+        status?: 'IN_PROGRESS' | 'ENDED' | 'NOT_AVAILABLE' | string;
+        endDate?: string | Date | null;
+      };
+    } | null;
   };
   site?: {
     siteId?: string;

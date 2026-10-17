@@ -34,6 +34,8 @@ export const PRICING_ROUTES = {
   resetConfigurationToDefaults: 'reset-configuration-to-defaults',
   getNotificationSetting: 'get-notification-setting',
   updateNotificationSetting: 'update-notification-setting',
+  getReviewPromptState: 'get-review-prompt-state',
+  updateReviewPromptState: 'update-review-prompt-state',
   getCurrentMember: 'get-current-member',
   addMembersToDiscountRule: 'add-members-to-discount-rule',
   createUnifiedRule: 'create-unified-rule',

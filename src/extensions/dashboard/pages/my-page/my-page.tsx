@@ -10,6 +10,7 @@ import { createCustomField, createMemberCustomField, createOrGetExtendedField, E
 import { AccessGroupsView } from '../../../../components/AccessGroup';
 import FirstTimeUserDetector from '../../../../components/Onboarding/FirstUseDetector';
 import { useDashboardStats } from '../../../../components/CustomerView/useDashboardStats';
+import { ReviewPrompt } from '../../../../components/ReviewPrompt/ReviewPrompt';
 
 const DASHBOARD_FONTS_URL = 'https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Manrope:wght@400;500;600;700;800&display=swap';
 
@@ -207,6 +208,7 @@ const Index: FC = () => {
           {renderContent()}
         </main>
       </div>
+      <ReviewPrompt />
     </FirstTimeUserDetector>
   );
 };
