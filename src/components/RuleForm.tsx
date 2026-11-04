@@ -34,6 +34,43 @@ interface Wholesaler { id: string; name: string; email: string }
 
 const EMPTY_GROUP: NewAccessGroup = { name: '', minOrder: '', maxOrder: '', minProducts: '', maxProducts: '' };
 
+type ShippingMethod = 'free_shipping' | 'flat_rate' | 'threshold' | 'weight_rate' | 'weight_bands';
+
+interface WeightBandInput {
+  minWeight: number | undefined;
+  maxWeight: number | undefined;
+  price: number | undefined;
+}
+
+const EMPTY_BAND: WeightBandInput = { minWeight: 0, maxWeight: undefined, price: undefined };
+const MAX_WEIGHT_BANDS = 30;
+
+const optionalNumber = (value: unknown): number | undefined => {
+  if (value === undefined || value === null || value === '') return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+};
+
+function readWeightBands(value: unknown): WeightBandInput[] {
+  let raw = value;
+  if (typeof value === 'string') {
+    try {
+      raw = value.trim() ? JSON.parse(value) : [];
+    } catch {
+      raw = [];
+    }
+  }
+  if (!Array.isArray(raw) || raw.length === 0) return [{ ...EMPTY_BAND }];
+  return raw.map((entry) => {
+    const band = entry && typeof entry === 'object' ? entry as Record<string, unknown> : {};
+    return {
+      minWeight: optionalNumber(band.minWeight),
+      maxWeight: optionalNumber(band.maxWeight),
+      price: optionalNumber(band.price),
+    };
+  });
+}
+
 interface RuleFormProps {
   mode: 'create' | 'edit';
   rule?: any;
@@ -79,9 +116,10 @@ interface FormData {
   casePackSize: number | undefined;
   enforceMultiples: boolean;
   moqType: 'minimum_units' | 'case_pack' | 'both';
-  shippingType: 'free_shipping' | 'flat_rate' | 'threshold';
+  shippingType: ShippingMethod;
   shippingRate: number | undefined;
   freeShippingThreshold: number | undefined;
+  weightBands: WeightBandInput[];
   b2cOnly: boolean;
   belowMinimumShippingRate: number | undefined;
   bulkCsvItems: any[];
@@ -159,6 +197,7 @@ export const RuleForm: FC<RuleFormProps> = ({
       shippingType: rule?.shippingType || 'free_shipping',
       shippingRate: rule?.shippingRate || undefined,
       freeShippingThreshold: rule?.freeShippingThreshold || undefined,
+      weightBands: readWeightBands(rule?.weightBands),
       b2cOnly: rule?.b2cOnly ?? false,
       belowMinimumShippingRate: rule?.belowMinimumShippingRate || undefined,
       bulkCsvItems: rule?.bulkCsvItems || [],
@@ -245,6 +284,42 @@ export const RuleForm: FC<RuleFormProps> = ({
       if (formData.shippingType === 'threshold') {
         if (!formData.freeShippingThreshold || formData.freeShippingThreshold <= 0) {
           newErrors.push('Minimum order value is required for threshold-based free shipping');
+        }
+      }
+      if (formData.shippingType === 'weight_rate') {
+        if (formData.shippingRate === undefined || formData.shippingRate < 0) {
+          newErrors.push('Rate per weight unit is required');
+        }
+      }
+      if (formData.shippingType === 'weight_bands') {
+        const bands = formData.weightBands;
+        if (bands.length === 0) newErrors.push('Add at least one weight band');
+        if (bands.length > MAX_WEIGHT_BANDS) newErrors.push(`A shipping rule can have at most ${MAX_WEIGHT_BANDS} weight bands`);
+        bands.forEach((band, index) => {
+          const label = `Band ${index + 1}`;
+          if (band.minWeight === undefined || band.minWeight < 0) newErrors.push(`${label}: minimum weight is required`);
+          if (band.price === undefined || band.price < 0) newErrors.push(`${label}: price is required`);
+          if (band.maxWeight !== undefined && band.maxWeight < 0) newErrors.push(`${label}: maximum weight cannot be negative`);
+          if (band.minWeight !== undefined && band.maxWeight !== undefined && band.maxWeight <= band.minWeight) {
+            newErrors.push(`${label}: maximum weight must be greater than the minimum`);
+          }
+        });
+        const openBands = bands.filter((band) => band.maxWeight === undefined);
+        if (openBands.length > 1) newErrors.push('Only the last weight band can omit a maximum');
+        const ordered = bands
+          .filter((band): band is WeightBandInput & { minWeight: number } => band.minWeight !== undefined)
+          .slice()
+          .sort((a, b) => a.minWeight - b.minWeight);
+        if (openBands.length === 1 && ordered.length > 0 && openBands[0] !== ordered[ordered.length - 1]) {
+          newErrors.push('Only the last weight band can omit a maximum');
+        }
+        if (ordered[0] && ordered[0].minWeight !== 0) newErrors.push('The first weight band must start at 0');
+        for (let index = 0; index < ordered.length - 1; index++) {
+          const current = ordered[index];
+          const next = ordered[index + 1];
+          if (current.maxWeight === undefined || next.minWeight === undefined) continue;
+          if (next.minWeight < current.maxWeight) newErrors.push('Weight bands overlap');
+          if (next.minWeight > current.maxWeight) newErrors.push('Weight bands leave a gap, so some orders would have no rate');
         }
       }
     }
@@ -382,6 +457,13 @@ export const RuleForm: FC<RuleFormProps> = ({
         ...formData,
         startDate: formData.startDate ? formData.startDate.toISOString() : undefined,
         endDate: formData.endDate ? formData.endDate.toISOString() : undefined,
+        weightBands: formData.shippingType === 'weight_bands'
+          ? JSON.stringify(formData.weightBands.map((band) => ({
+            minWeight: band.minWeight,
+            maxWeight: band.maxWeight,
+            price: band.price,
+          })))
+          : undefined,
       };
 
       await onSubmit(submitData);
@@ -744,6 +826,7 @@ export const RuleForm: FC<RuleFormProps> = ({
                         shippingType: 'free_shipping',
                         shippingRate: undefined,
                         freeShippingThreshold: undefined,
+                        weightBands: [{ ...EMPTY_BAND }],
                         b2cOnly: false,
                       }));
                     }}
@@ -1073,6 +1156,29 @@ export const RuleForm: FC<RuleFormProps> = ({
             <Box direction="vertical" gap="small">
               <Heading appearance="H4" className={rf.sectionTitle}>Shipping Configuration</Heading>
               <Box direction="vertical" gap="medium">
+                <FormField label="Shipping method *">
+                  <Box direction="vertical" gap="extraSmall">
+                    <Dropdown
+                      options={[
+                        { id: 'free_shipping', value: 'Free shipping' },
+                        { id: 'flat_rate', value: 'Flat rate' },
+                        { id: 'threshold', value: 'Free over an order value' },
+                        { id: 'weight_rate', value: 'Rate per weight unit' },
+                        { id: 'weight_bands', value: 'Weight bands' },
+                      ]}
+                      selectedId={formData.shippingType}
+                      onSelect={(option) => {
+                        const shippingType = option.id as ShippingMethod;
+                        setFormData(prev => ({ ...prev, shippingType }));
+                      }}
+                      placeholder="Select a shipping method"
+                    />
+                    <Text size="tiny" secondary>
+                      Use a weight method for wholesalers. For regular customers, choose Free shipping and check B2C customers only.
+                    </Text>
+                  </Box>
+                </FormField>
+
 {formData.shippingType === 'flat_rate' && (
                   <FormField label={money('Shipping Rate') + ' *'}>
                     <Input
@@ -1096,6 +1202,100 @@ export const RuleForm: FC<RuleFormProps> = ({
                       <Text size="tiny" secondary>Orders above this amount will qualify for free shipping.</Text>
                     </Box>
                   </FormField>
+                )}
+
+                {formData.shippingType === 'weight_rate' && (
+                  <FormField label={money('Rate per weight unit') + ' *'}>
+                    <Box direction="vertical" gap="extraSmall">
+                      <Input
+                        type="number"
+                        value={formData.shippingRate ?? ''}
+                        onChange={(e) => { const v = e.target.value; setFormData(prev => ({ ...prev, shippingRate: v === '' ? undefined : parseFloat(v) })); }}
+                        prefix={moneyAffix}
+                      />
+                      <Text size="tiny" secondary>
+                        Multiplied by the total shipping weight of the order. The unit is the store’s weight unit (kg or lb). Set Shipping weight on each physical product and on each variant. A product with no weight counts as 0.
+                      </Text>
+                    </Box>
+                  </FormField>
+                )}
+
+                {formData.shippingType === 'weight_bands' && (
+                  <Box direction="vertical" gap="small">
+                    <Text size="tiny" secondary>
+                      Each band is a weight range and a price. The last band can leave the maximum empty. Set Shipping weight on each physical product and on each variant. A product with no weight counts as 0. The unit is the store’s weight unit (kg or lb).
+                    </Text>
+                    {formData.weightBands.map((band, index) => (
+                      <Box key={index} gap="small" verticalAlign="bottom">
+                        <FormField label={index === 0 ? 'From' : undefined}>
+                          <Input
+                            type="number"
+                            value={band.minWeight ?? ''}
+                            onChange={(e) => {
+                              const minWeight = e.target.value === '' ? undefined : parseFloat(e.target.value);
+                              setFormData(prev => ({
+                                ...prev,
+                                weightBands: prev.weightBands.map((row, rowIndex) => rowIndex === index ? { ...row, minWeight } : row),
+                              }));
+                            }}
+                          />
+                        </FormField>
+                        <FormField label={index === 0 ? 'To' : undefined}>
+                          <Input
+                            type="number"
+                            value={band.maxWeight ?? ''}
+                            placeholder="No limit"
+                            onChange={(e) => {
+                              const maxWeight = e.target.value === '' ? undefined : parseFloat(e.target.value);
+                              setFormData(prev => ({
+                                ...prev,
+                                weightBands: prev.weightBands.map((row, rowIndex) => rowIndex === index ? { ...row, maxWeight } : row),
+                              }));
+                            }}
+                          />
+                        </FormField>
+                        <FormField label={index === 0 ? money('Price') : undefined}>
+                          <Input
+                            type="number"
+                            value={band.price ?? ''}
+                            onChange={(e) => {
+                              const price = e.target.value === '' ? undefined : parseFloat(e.target.value);
+                              setFormData(prev => ({
+                                ...prev,
+                                weightBands: prev.weightBands.map((row, rowIndex) => rowIndex === index ? { ...row, price } : row),
+                              }));
+                            }}
+                            prefix={moneyAffix}
+                          />
+                        </FormField>
+                        {formData.weightBands.length > 1 && (
+                          <TextButton
+                            size="small"
+                            onClick={() => setFormData(prev => ({
+                              ...prev,
+                              weightBands: prev.weightBands.filter((_, rowIndex) => rowIndex !== index),
+                            }))}
+                          >
+                            Remove
+                          </TextButton>
+                        )}
+                      </Box>
+                    ))}
+                    <TextButton
+                      size="small"
+                      disabled={formData.weightBands.length >= MAX_WEIGHT_BANDS}
+                      onClick={() => setFormData(prev => {
+                        if (prev.weightBands.length >= MAX_WEIGHT_BANDS) return prev;
+                        const previous = prev.weightBands[prev.weightBands.length - 1];
+                        return {
+                          ...prev,
+                          weightBands: [...prev.weightBands, { minWeight: previous?.maxWeight, maxWeight: undefined, price: undefined }],
+                        };
+                      })}
+                    >
+                      Add band
+                    </TextButton>
+                  </Box>
                 )}
 
                 <FormField label={money('Minimum Order Value')}>

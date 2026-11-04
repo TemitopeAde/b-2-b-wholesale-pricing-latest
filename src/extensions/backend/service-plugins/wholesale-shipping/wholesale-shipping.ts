@@ -3,7 +3,7 @@ import { auth } from "@wix/essentials";
 import { items } from "@wix/data";
 import { isMemberWholesaleApproved } from "../../../../backend/wholesale/approval.server";
 import { getMemberAccessGroups } from "../../../../backend/wholesale/access-groups.server";
-import { selectShippingQuote } from "../../../../backend/wholesale/shipping";
+import { selectShippingQuote, totalShippableWeight } from "../../../../backend/wholesale/shipping";
 import { COLLECTIONS, record, text, type RecordData } from "../../../../backend/wholesale/types";
 
 const queryItems = auth.elevate(items.query);
@@ -28,14 +28,14 @@ shippingRates.provideHandlers({
       ? (await getMemberAccessGroups(memberId)).map((group) => text(group["_id"]))
       : [];
 
-    const subtotal = (request.lineItems ?? [])
-      .filter((item) => item.physicalProperties?.shippable !== false)
-      .reduce((total, item) => {
-        const lineTotal = Number(item.totalPrice);
-        return total + (Number.isFinite(lineTotal) ? lineTotal : (Number(item.price) || 0) * (item.quantity ?? 0));
-      }, 0);
+    const shippable = (request.lineItems ?? []).filter((item) => item.physicalProperties?.shippable !== false);
+    const subtotal = shippable.reduce((total, item) => {
+      const lineTotal = Number(item.totalPrice);
+      return total + (Number.isFinite(lineTotal) ? lineTotal : (Number(item.price) || 0) * (item.quantity ?? 0));
+    }, 0);
+    const totalWeight = totalShippableWeight(shippable);
 
-    const quote = selectShippingQuote(await listShippingRules(), { isWholesale, groupIds }, subtotal);
+    const quote = selectShippingQuote(await listShippingRules(), { isWholesale, groupIds }, subtotal, new Date(), totalWeight);
     if (!quote) return { shippingRates: [] };
 
     return {

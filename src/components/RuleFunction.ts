@@ -30,9 +30,11 @@ export interface PricingRule {
   updatedDate?: string;
   revision?: string | number;
   // Shipping specific fields
-  shippingType?: 'free_shipping' | 'flat_rate' | 'threshold';
+  shippingType?: 'free_shipping' | 'flat_rate' | 'threshold' | 'weight_rate' | 'weight_bands';
   shippingRate?: number;
   freeShippingThreshold?: number;
+  /** JSON string or parsed rows of { minWeight, maxWeight, price }. */
+  weightBands?: string | Array<{ minWeight?: number; maxWeight?: number; price?: number }>;
   b2cOnly?: boolean;
   belowMinimumShippingRate?: number;
 }
@@ -438,10 +440,29 @@ export const formatShippingInfo = (rule: PricingRule, currency?: string | null) 
       return rule.freeShippingThreshold != null
         ? `Free Shipping over ${money(rule.freeShippingThreshold, currency)}${b2c}`
         : `Threshold Shipping${b2c}`;
+    case 'weight_rate':
+      return rule.shippingRate != null
+        ? `${money(rule.shippingRate, currency)} per weight unit${b2c}`
+        : `Rate per weight unit${b2c}`;
+    case 'weight_bands': {
+      const count = weightBandCount(rule.weightBands);
+      return count ? `${count} weight band${count === 1 ? '' : 's'}${b2c}` : `Weight bands${b2c}`;
+    }
     default:
       return 'Shipping Rule';
   }
 };
+
+function weightBandCount(value: PricingRule['weightBands']): number {
+  if (Array.isArray(value)) return value.length;
+  if (typeof value !== 'string' || !value.trim()) return 0;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
+}
 
 export const getAccessGroupNames = (groupIds: string[], accessGroups: AccessGroup[]) => {
   if (!groupIds || groupIds.length === 0) return 'All Groups';

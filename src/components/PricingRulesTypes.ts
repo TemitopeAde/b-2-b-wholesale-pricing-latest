@@ -24,9 +24,10 @@ export interface PricingRule {
   casePackSize?: number;
   enforceMultiples?: boolean;
   // Shipping specific fields
-  shippingType?: 'free_shipping' | 'flat_rate' | 'threshold';
+  shippingType?: 'free_shipping' | 'flat_rate' | 'threshold' | 'weight_rate' | 'weight_bands';
   shippingRate?: number;
   freeShippingThreshold?: number;
+  weightBands?: string | Array<{ minWeight?: number; maxWeight?: number; price?: number }>;
 }
 
 export interface AccessGroup {
@@ -90,9 +91,10 @@ export interface RuleFormData {
   startDate?: string;
   endDate?: string;
   // Shipping specific fields
-  shippingType?: 'free_shipping' | 'flat_rate' | 'threshold';
+  shippingType?: 'free_shipping' | 'flat_rate' | 'threshold' | 'weight_rate' | 'weight_bands';
   shippingRate?: number;
   freeShippingThreshold?: number;
+  weightBands?: string | Array<{ minWeight?: number; maxWeight?: number; price?: number }>;
 }
 
 // API Response types

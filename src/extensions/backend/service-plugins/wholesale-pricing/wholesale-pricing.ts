@@ -57,12 +57,6 @@ customTriggers.provideHandlers({
         return { eligibleTriggers: [] };
       }
 
-      const customerGroups = await getMemberAccessGroups(memberId);
-      if (customerGroups.length === 0) {
-        console.log(`[wholesale-trigger] member ${memberId} has no access groups - no triggers eligible`);
-        return { eligibleTriggers: [] };
-      }
-
       const lineItems = request.lineItems ?? [];
       const totalOrderValue = lineItems.reduce(
         (total, item) => total + (Number(item.price) || 0) * (item.quantity ?? 0),
@@ -73,12 +67,20 @@ customTriggers.provideHandlers({
         0,
       );
 
-      const meetsAnyGroup = customerGroups.some((group) =>
-        meetsGroupRequirements(group, totalOrderValue, totalProductQuantity),
-      );
-      if (!meetsAnyGroup) {
-        console.log(`[wholesale-trigger] member ${memberId} order does not meet any access group requirements`);
-        return { eligibleTriggers: [] };
+      // Members assigned to a rule directly (no access group) are still eligible: the rule's own
+      // CUSTOMER_ELIGIBILITY trigger restricts it to its listed members, matching the product page.
+      // Order limits only apply to members who belong to at least one access group.
+      const customerGroups = await getMemberAccessGroups(memberId);
+      if (customerGroups.length > 0) {
+        const meetsAnyGroup = customerGroups.some((group) =>
+          meetsGroupRequirements(group, totalOrderValue, totalProductQuantity),
+        );
+        if (!meetsAnyGroup) {
+          console.log(
+            `[wholesale-trigger] member ${memberId} order (value ${totalOrderValue}, qty ${totalProductQuantity}) does not meet any of ${customerGroups.length} access group requirement(s)`,
+          );
+          return { eligibleTriggers: [] };
+        }
       }
 
       // Echo each requested occurrence's identifier back exactly, or Wix can't match it to its rule.
