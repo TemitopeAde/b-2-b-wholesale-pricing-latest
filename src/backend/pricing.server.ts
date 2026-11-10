@@ -13,7 +13,6 @@ import { appInstances } from "@wix/app-management";
 import { billing } from "@wix/app-management";
 import { discountRules } from '@wix/ecom';
 import { items } from '@wix/data';
-import { emailTransmissions } from '@wix/email-transmissions';
 import { customFields } from '@wix/members';
 import {
   type CreateUnifiedRuleInput,
@@ -126,20 +125,42 @@ const elevatedGetDataItem = auth.elevate(items.get);
 
 
 const CONFIGURATION_COLLECTION = '@wd-strategies/wholesale-appllication/Configuration';
-const elevatedSendEmailTransmission = auth.elevate(emailTransmissions.sendEmailTransmission);
+const EMAIL_SEND_ENDPOINT = 'https://email-relay-theta.vercel.app/sendemail';
 
 async function sendTransactionalEmail(recipientEmail: string, subject: string, html: string) {
-  const response = await elevatedSendEmailTransmission({
-    emailSubject: subject,
-    emailHtmlContent: html,
-    senderName: 'Quarry Works Studio',
-    toRecipients: [{ emailAddress: recipientEmail }],
-    type: 'TRANSACTIONAL',
+  const idempotencyKey = crypto.randomUUID();
+  const response = await fetch(EMAIL_SEND_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      recipient: recipientEmail,
+      email: recipientEmail,
+      cc: [],
+      subject,
+      data: { html, attachments: [] },
+      attachments: [],
+      idempotencyKey,
+    }),
   });
-  if (!response.emailTransmission?._id || response.emailTransmission.status !== 'ACCEPTED') {
-    throw new Error(`Wix did not accept the email transmission (status: ${response.emailTransmission?.status || 'unknown'}).`);
+
+  const responseText = await response.text();
+  let result: Record<string, any> = {};
+  try {
+    result = responseText ? JSON.parse(responseText) : {};
+  } catch {
+    result = {};
   }
-  return response.emailTransmission;
+  const emptyBody = !responseText.trim();
+  if (response.status === 408 || (emptyBody && [500, 502, 504].includes(response.status))) {
+    throw new Error(`Email endpoint returned ${response.status} without a response body. Delivery may have succeeded; check the inbox before retrying.`);
+  }
+  if (!response.ok || result.success === false) {
+    throw new Error(String(result.error || result.message || `Email endpoint failed (${response.status})`));
+  }
+  return {
+    _id: String(result.messageId || result.result?.messageId || 'accepted'),
+    status: 'ACCEPTED',
+  };
 }
 const INSTALL_GUIDE_EMAIL_SUBJECT = 'Welcome to Wholesale Pricing — Setup Guide';
 
