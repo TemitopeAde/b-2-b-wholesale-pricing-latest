@@ -18,7 +18,7 @@ import { DashIcons } from './Dashboard/icons';
 import st from './Setting.module.css';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
-import { getConfiguration, saveConfiguration } from '../backend/pricing.client';
+import { getConfiguration, saveConfiguration, sendWholesaleReceiptTestEmail } from '../backend/pricing.client';
 
 interface NotificationSettings {
   customerRegistrations: boolean;
@@ -81,6 +81,10 @@ export const SettingsView: FC = () => {
   const [errors, setErrors] = useState<ValidationErrors>({});
   const [success, setSuccess] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [testEmail, setTestEmail] = useState('');
+  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
+  const [testEmailSuccess, setTestEmailSuccess] = useState<string | null>(null);
+  const [testEmailError, setTestEmailError] = useState<string | null>(null);
 
   // Load settings on component mount
   useEffect(() => {
@@ -213,6 +217,27 @@ export const SettingsView: FC = () => {
     }
   };
 
+  const handleSendTestEmail = async () => {
+    setTestEmailSuccess(null);
+    setTestEmailError(null);
+    const recipient = testEmail.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient)) {
+      setTestEmailError('Enter a valid email address.');
+      return;
+    }
+
+    setIsSendingTestEmail(true);
+    try {
+      const result = await sendWholesaleReceiptTestEmail(recipient);
+      if (!result?.success) throw new Error('Wix did not accept the test email.');
+      setTestEmailSuccess(`Wix accepted the test email for ${recipient}. Check that inbox for delivery.`);
+    } catch (error) {
+      setTestEmailError(error instanceof Error ? error.message : 'The test email could not be sent.');
+    } finally {
+      setIsSendingTestEmail(false);
+    }
+  };
+
   const notificationItems = [
     {
       key: 'customerRegistrations' as keyof NotificationSettings,
@@ -333,6 +358,40 @@ export const SettingsView: FC = () => {
             </div>
           ))}
         </div>
+      </Card>
+
+      <Card aria-label="Test email">
+        <Card.Header title="Test application receipt" subtitle="Send a test copy of the applicant confirmation email to an address you enter." />
+        <Box direction="vertical" gap="16px" padding="16px">
+          <Text size="small" secondary>This sends only an email. It does not submit an application or change wholesale access.</Text>
+          <FormField label="Send test to">
+            <Input
+              type="email"
+              value={testEmail}
+              onChange={(event) => {
+                setTestEmail(event.target.value);
+                setTestEmailSuccess(null);
+                setTestEmailError(null);
+              }}
+              placeholder="you@example.com"
+              autoComplete="email"
+              aria-label="Email address for test message"
+              aria-invalid={Boolean(testEmailError)}
+            />
+          </FormField>
+          <Box>
+            <Button
+              variant="secondary"
+              onClick={handleSendTestEmail}
+              disabled={isSendingTestEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(testEmail.trim())}
+              loading={isSendingTestEmail}
+            >
+              {isSendingTestEmail ? 'Sending test…' : 'Send test email'}
+            </Button>
+          </Box>
+          {testEmailSuccess && <Notice tone="success">{testEmailSuccess}</Notice>}
+          {testEmailError && <Notice tone="error">{testEmailError}</Notice>}
+        </Box>
       </Card>
 
       <Card aria-label="Email templates">

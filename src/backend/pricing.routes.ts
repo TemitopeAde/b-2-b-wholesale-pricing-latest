@@ -55,6 +55,8 @@ export const PRICING_ROUTES = {
   getAppPlanIds: 'get-app-plan-ids',
   sendWholesaleApprovalEmail: 'send-wholesale-approval-email',
   sendWholesaleRejectionEmail: 'send-wholesale-rejection-email',
+  sendWholesaleApplicationReceipt: 'send-wholesale-application-receipt',
+  sendWholesaleReceiptTestEmail: 'send-wholesale-receipt-test-email',
   verifySiteId: 'verify-site-id',
   sendNewApplicationNotificationToOwner: 'send-new-application-notification-to-owner',
   getAllStoreCategories: 'get-all-store-categories',

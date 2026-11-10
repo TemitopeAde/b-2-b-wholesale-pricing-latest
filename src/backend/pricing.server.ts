@@ -13,6 +13,7 @@ import { appInstances } from "@wix/app-management";
 import { billing } from "@wix/app-management";
 import { discountRules } from '@wix/ecom';
 import { items } from '@wix/data';
+import { emailTransmissions } from '@wix/email-transmissions';
 import { customFields } from '@wix/members';
 import {
   type CreateUnifiedRuleInput,
@@ -125,7 +126,21 @@ const elevatedGetDataItem = auth.elevate(items.get);
 
 
 const CONFIGURATION_COLLECTION = '@wd-strategies/wholesale-appllication/Configuration';
-const PROTON_EMAIL_ENDPOINT = 'https://www.wixcustomsolutions.com/_functions/proton';
+const elevatedSendEmailTransmission = auth.elevate(emailTransmissions.sendEmailTransmission);
+
+async function sendTransactionalEmail(recipientEmail: string, subject: string, html: string) {
+  const response = await elevatedSendEmailTransmission({
+    emailSubject: subject,
+    emailHtmlContent: html,
+    senderName: 'Quarry Works Studio',
+    toRecipients: [{ emailAddress: recipientEmail }],
+    type: 'TRANSACTIONAL',
+  });
+  if (!response.emailTransmission?._id || response.emailTransmission.status !== 'ACCEPTED') {
+    throw new Error(`Wix did not accept the email transmission (status: ${response.emailTransmission?.status || 'unknown'}).`);
+  }
+  return response.emailTransmission;
+}
 const INSTALL_GUIDE_EMAIL_SUBJECT = 'Welcome to Wholesale Pricing — Setup Guide';
 
 const DEFAULT_NOTIFICATION_SETTINGS = {
@@ -302,28 +317,8 @@ export const updateReviewPromptState = webMethod(
 
 export async function sendInstallGuideEmail(recipientEmail: string) {
   const htmlContent = getInstallGuideEmailHTML();
-
   try {
-
-    const response = await fetch(PROTON_EMAIL_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        email: recipientEmail,
-        subject: INSTALL_GUIDE_EMAIL_SUBJECT,
-        data: {
-          emailTemplate: htmlContent,
-        },
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed with status ${response.status}`);
-    }
-
-    const data = await response.json();
+    const data = await sendTransactionalEmail(recipientEmail, INSTALL_GUIDE_EMAIL_SUBJECT, htmlContent);
 
     return {
       success: true,
@@ -3551,29 +3546,12 @@ export const sendWholesaleApprovalEmail = webMethod(
     const htmlContent = getApprovalEmailHTML(template?.bodyText);
 
     try {
-      const response = await fetch(PROTON_EMAIL_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: `${recipientEmail}`,
-          subject,
-          data: {
-            emailTemplate: htmlContent,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await sendTransactionalEmail(recipientEmail, subject, htmlContent);
 
       return {
         success: true,
-        messageId: data.messageId || 'sent',
+        messageId: data?._id || 'accepted',
+        status: data?.status,
         recipientEmail,
         subject,
         data,
@@ -3599,29 +3577,12 @@ export const sendWholesaleRejectionEmail = webMethod(
 
 
     try {
-      const response = await fetch(PROTON_EMAIL_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: `${recipientEmail}`,
-          subject,
-          data: {
-            emailTemplate: htmlContent,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await sendTransactionalEmail(recipientEmail, subject, htmlContent);
 
       return {
         success: true,
-        messageId: data.messageId || 'sent',
+        messageId: data?._id || 'accepted',
+        status: data?.status,
         recipientEmail,
         subject,
         data,
@@ -3698,6 +3659,56 @@ const getNewApplicationEmailHTML = (applicationData: any, bodyText?: string): st
   `;
 };
 
+const getApplicationReceiptHTML = () => `
+  <div style="font-family: 'American Typewriter', Georgia, serif; max-width: 600px; margin: 0 auto; padding: 32px 24px; background: #f7f4ed; color: #5a3825; line-height: 1.7;">
+    <h1 style="font-family: 'Chelsea Market', Georgia, serif; color: #68452f; font-size: 26px; line-height: 1.3;">We received your wholesale application</h1>
+    <p>Thank you for applying to become a Quarry Works Studio wholesale partner! We received your application and will review it within 2–3 business days. We’ll follow up by email.</p>
+    <p>Wholesale pricing becomes available after approval. If you have any questions, reply to this email.</p>
+    <p>Warmly,<br />Quarry Works Studio</p>
+  </div>
+`;
+
+export const sendWholesaleReceiptTestEmail = webMethod(
+  Permissions.Admin,
+  async (recipientEmail: string) => {
+    const token = await auth.getTokenInfo();
+    authorizeDashboard(token);
+    const email = typeof recipientEmail === 'string' ? recipientEmail.trim().toLowerCase() : '';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new Error('Enter a valid email address.');
+    }
+    const subject = 'TEST: We received your wholesale application';
+    const html = getApplicationReceiptHTML().replace(
+      '<h1',
+      '<p style="padding: 10px 14px; background: #efe4d4; font-family: Arial, sans-serif; font-size: 13px;">Test email — no application was submitted.</p><h1',
+    );
+    const transmission = await sendTransactionalEmail(email, subject, html);
+    return {
+      success: true,
+      recipientEmail: email,
+      subject,
+      transmissionId: transmission._id,
+      status: transmission.status,
+    };
+  }
+);
+
+export const sendWholesaleApplicationReceipt = webMethod(
+  Permissions.SiteMember,
+  async (recipientEmail: string, memberId: string) => {
+    const email = recipientEmail.trim().toLowerCase();
+    const current = await elevatedGetCurrentMember({ fieldsets: ['FULL'] });
+    const member = (current as any)?.member ?? current;
+    const currentEmail = String(member?.loginEmail || '').trim().toLowerCase();
+    if (!member?._id || member._id !== memberId || currentEmail !== email) {
+      throw new Error('The application receipt must be sent to the signed-in applicant.');
+    }
+    const subject = 'We received your wholesale application';
+    const transmission = await sendTransactionalEmail(email, subject, getApplicationReceiptHTML());
+    return { success: true, messageId: transmission?._id, status: transmission?.status, recipientEmail: email, subject };
+  }
+);
+
 export const sendNewApplicationNotificationToOwner = webMethod(
   Permissions.Anyone,
   async (applicationData: any) => {
@@ -3714,29 +3725,12 @@ export const sendNewApplicationNotificationToOwner = webMethod(
       const subject = template?.subject || `New Wholesale Application from ${applicationData.contactName}`;
       const htmlContent = getNewApplicationEmailHTML(applicationData, template?.bodyText);
 
-      const response = await fetch(PROTON_EMAIL_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: ownerEmail,
-          subject,
-          data: {
-            emailTemplate: htmlContent,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed with status ${response.status}`);
-      }
-
-      const data = await response.json();
+      const data = await sendTransactionalEmail(ownerEmail, subject, htmlContent);
 
       return {
         success: true,
-        messageId: data.messageId || 'sent',
+        messageId: data?._id || 'accepted',
+        status: data?.status,
         recipientEmail: ownerEmail,
         subject,
         data,

@@ -1,6 +1,7 @@
 import { items } from "@wix/data";
 import { members } from "@wix/members";
 import { record, text, type RecordData } from "../backend/wholesale/types";
+import { sendWholesaleApplicationReceipt } from "../backend/pricing.client";
 
 const COLLECTION = "@wd-strategies/wholesale-appllication/application";
 export type SiteMember = {
@@ -119,7 +120,7 @@ export async function submitSiteApplication(
         : Array.isArray(value) && value.length,
     ),
   );
-  return record(
+  const saved = record(
     await items.insert(COLLECTION, {
       ...cleaned,
       interestedProducts: Array.isArray(data["interestedProducts"])
@@ -134,4 +135,18 @@ export async function submitSiteApplication(
       submissionDate: new Date().toISOString(),
     }),
   );
+  try {
+    const receipt = await sendWholesaleApplicationReceipt(
+      member.member.loginEmail,
+      member.member._id,
+    );
+    if (!(receipt as any)?.success) {
+      console.error("Wholesale application saved, but its receipt email was not accepted.", receipt);
+      return { ...saved, receiptEmailWarning: true };
+    }
+  } catch (error) {
+    console.error("Wholesale application saved, but its receipt email failed.", error);
+    return { ...saved, receiptEmailWarning: true };
+  }
+  return saved;
 }
