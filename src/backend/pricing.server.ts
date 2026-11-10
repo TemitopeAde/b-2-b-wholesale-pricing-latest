@@ -1223,15 +1223,55 @@ async function fetchProductsBySlugs(slugs: string[]): Promise<{
     }
   };
 
+  // Every elevated SDK call costs a token lookup plus the request itself, so per-slug
+  // lookups blew the Worker's subrequest limit on category pages ("Too many subrequests").
+  // Resolve slugs with one `in` query per chunk; per-slug lookups are only a capped fallback.
+  const QUERY_CHUNK = 100;
+  const MAX_PER_SLUG_FALLBACKS = 5;
+
+  const lookupBatched = async (
+    label: 'v1' | 'v3',
+    queryChunk: (chunk: string[]) => Promise<any[]>,
+  ) => {
+    const pending = normalizedSlugs.filter((slug) => !slugToProduct.has(slug));
+    for (let i = 0; i < pending.length; i += QUERY_CHUNK) {
+      const chunk = pending.slice(i, i + QUERY_CHUNK);
+      try {
+        const items = await queryChunk(chunk);
+        for (const product of items || []) {
+          const productSlug = extractProductSlugValue(product)?.toLowerCase();
+          addProduct(product, productSlug && chunk.includes(productSlug) ? productSlug : undefined);
+        }
+        console.info(`[Wholesale] ${label.toUpperCase()} batched slug query | requested=${chunk.length} | returned=${items?.length || 0}`);
+      } catch (error) {
+        const message = `${label} batch: ${serializeError(error)}`;
+        chunk.forEach((slug) => {
+          lookupErrors[slug] = [lookupErrors[slug], message].filter(Boolean).join(' | ');
+        });
+        console.warn(`[Wholesale] ${label.toUpperCase()} batched slug query failed | requested=${chunk.length} | error=${serializeError(error)}`);
+      }
+    }
+  };
+
+  const fallbackSlugs = () =>
+    normalizedSlugs.filter((slug) => !slugToProduct.has(slug)).slice(0, MAX_PER_SLUG_FALLBACKS);
+
   try {
     // Unknown catalog version (e.g. getCatalogVersion failed) → try V3 first,
     // then fall back to V1 for anything still missing.
     if (catalogVersion === 'V3_CATALOG' || !catalogVersion) {
+      const elevatedQueryV3 = auth.elevate(productsV3.queryProducts);
+      await lookupBatched('v3', async (chunk) => {
+        const result: any = await (elevatedQueryV3() as any).in('slug', chunk).limit(chunk.length).find();
+        return result?.items || [];
+      });
+
       const elevatedGetBySlug = auth.elevate(productsV3.getProductBySlug);
+      const remainingV3 = fallbackSlugs();
       const SLUG_BATCH = 5;
 
-      for (let i = 0; i < normalizedSlugs.length; i += SLUG_BATCH) {
-        const batch = normalizedSlugs.slice(i, i + SLUG_BATCH);
+      for (let i = 0; i < remainingV3.length; i += SLUG_BATCH) {
+        const batch = remainingV3.slice(i, i + SLUG_BATCH);
         const batchStartedAt = Date.now();
         const results = await Promise.all(
           batch.map(async (slug) => {
@@ -1269,7 +1309,13 @@ async function fetchProductsBySlugs(slugs: string[]): Promise<{
     }
 
     if (catalogVersion !== 'V3_CATALOG') {
-      const remaining = normalizedSlugs.filter((slug) => !slugToProduct.has(slug));
+      const elevatedQueryV1 = auth.elevate(products.queryProducts);
+      await lookupBatched('v1', async (chunk) => {
+        const result: any = await (elevatedQueryV1() as any).in('slug', chunk).limit(chunk.length).find();
+        return result?.items || [];
+      });
+
+      const remaining = fallbackSlugs();
       if (remaining.length > 0) {
         await lookupV1(remaining);
       }

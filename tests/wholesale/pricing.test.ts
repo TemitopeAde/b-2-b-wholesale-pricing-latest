@@ -20,6 +20,8 @@ const sdk = vi.hoisted(() => ({
   fields: vi.fn(),
   products: vi.fn(),
   catalog: vi.fn(),
+  v3Query: vi.fn(),
+  v3BySlug: vi.fn(),
 }));
 vi.mock("@wix/essentials", () => ({
   auth: { elevate: (fn: unknown) => fn, getTokenInfo: sdk.token },
@@ -47,7 +49,7 @@ vi.mock("@wix/members", () => ({
 vi.mock("@wix/stores", () => ({
   collections: {},
   products: { getProduct: sdk.products },
-  productsV3: {},
+  productsV3: { queryProducts: sdk.v3Query, getProductBySlug: sdk.v3BySlug },
   catalogVersioning: { getCatalogVersion: sdk.catalog },
 }));
 vi.mock("@wix/categories", () => ({ categories: {} }));
@@ -111,6 +113,7 @@ function builder(items: unknown[], next?: unknown) {
   };
   return {
     eq: vi.fn().mockReturnThis(),
+    in: vi.fn().mockReturnThis(),
     descending: vi.fn().mockReturnThis(),
     limit: vi.fn().mockReturnThis(),
     isNotEmpty: vi.fn().mockReturnThis(),
@@ -410,6 +413,31 @@ describe("reused pricing backend regressions", () => {
     await pricing.getProductWholesalePrice("product", "USD", "requested");
     expect(sdk.getMember).toHaveBeenCalledWith("requested", expect.anything());
     expect(sdk.member).not.toHaveBeenCalled();
+  });
+});
+
+describe("category page slug pricing", () => {
+  it("resolves many slugs with one batched V3 query instead of a lookup per slug", async () => {
+    const slugs = Array.from({ length: 14 }, (_, i) => `product-${i}`);
+    const query = builder(
+      slugs.map((slug, i) => ({ _id: `p${i}`, slug, actualPriceRange: { minValue: { amount: "100" } } })),
+    );
+    sdk.v3Query.mockReset().mockReturnValue(query);
+    sdk.v3BySlug.mockReset();
+    sdk.catalog.mockResolvedValue({ catalogVersion: "V3_CATALOG" });
+    sdk.member.mockResolvedValue({ member: { _id: "member" } });
+    sdk.getMember.mockResolvedValue({ _id: "member", contactId: "contact" });
+    sdk.contact.mockResolvedValue({ info: { extendedFields: { items: { "custom.customer": "wholesale" } } } });
+    sdk.fields.mockReturnValue(builder([{ key: "custom.customer", displayName: "customer" }]));
+    sdk.queryData.mockReturnValue(builder([original]));
+
+    const result = await pricing.getWholesalePricesBySlugs(slugs, "USD");
+
+    expect(sdk.v3Query).toHaveBeenCalledTimes(1);
+    expect(query.in).toHaveBeenCalledWith("slug", slugs);
+    expect(sdk.v3BySlug).not.toHaveBeenCalled();
+    expect(Object.keys(result)).toHaveLength(14);
+    expect(result["product-3"]).toMatchObject({ hasWholesalePrice: true, wholesalePrice: 90 });
   });
 });
 
